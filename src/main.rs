@@ -39,10 +39,62 @@ async fn start_http(listener: TcpListener) {
     }
 }
 
-async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
+async fn handle_client(client_stream: TcpStream) -> Result<(), Error> {
+    // PEEK primeiro byte para detectar TLS ClientHello (0x16)
+    let mut peek_buf = [0u8; 1];
+    let peek_result = timeout(Duration::from_secs(5), client_stream.peek(&mut peek_buf)).await;
+
+    if let Ok(Ok(1)) = peek_result {
+        if peek_buf[0] == 0x16 {
+            // TLS ClientHello — fazer passthrough direto para SSH (0.0.0.0:22)
+            // O SSH/SSH tunnel recebe o TLS handshake diretamente
+            return handle_tls_passthrough(client_stream).await;
+        }
+    }
+
+    // Conexão não-TLS — lógica do AWProxy (101 → read → 200 → peek → tunnel)
+    handle_bsproxy(client_stream).await
+}
+
+/// TLS Passthrough — encaminha o handshake TLS diretamente para o SSH backend
+/// Usado pelo HTTP Injector no modo SSL/TLS Proxy → SSH
+async fn handle_tls_passthrough(client_stream: TcpStream) -> Result<(), Error> {
+    // Tentar SSH primeiro, fallback para VPN
+    let server_connect = TcpStream::connect("0.0.0.0:22").await;
+    let server_stream = match server_connect {
+        Ok(s) => s,
+        Err(e) => {
+            println!("TLS Passthrough: SSH nao disponivel em 0.0.0.0:22, tentando 0.0.0.0:1194");
+            match TcpStream::connect("0.0.0.0:1194").await {
+                Ok(s) => s,
+                Err(e2) => {
+                    println!("TLS Passthrough: Ambos falharam: {}, {}", e, e2);
+                    return Ok(());
+                }
+            }
+        }
+    };
+
+    let (client_read, client_write) = client_stream.into_split();
+    let (server_read, server_write) = server_stream.into_split();
+
+    let client_read = Arc::new(Mutex::new(client_read));
+    let client_write = Arc::new(Mutex::new(client_write));
+    let server_read = Arc::new(Mutex::new(server_read));
+    let server_write = Arc::new(Mutex::new(server_write));
+
+    let c2s = transfer_data(client_read, server_write);
+    let s2c = transfer_data(server_read, client_write);
+
+    tokio::try_join!(c2s, s2c)?;
+    Ok(())
+}
+
+/// BSProxy padrão — lógica do AWProxy (101 → read → 200 → peek → tunnel)
+async fn handle_bsproxy(mut client_stream: TcpStream) -> Result<(), Error> {
     let status = get_status();
 
-    // SEMPRE envia 101 primeiro (lógica do AWProxy)
+    // SEMPRE envia 101 primeiro
     client_stream
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
         .await?;
@@ -56,7 +108,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
         .await?;
 
-    // Detecta SSH vs VPN pelo peek (lógica do AWProxy)
+    // Detecta SSH vs VPN pelo peek
     let addr_proxy = if let Ok(data) = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await
         .unwrap_or_else(|_| Ok(String::new()))
     {
@@ -74,6 +126,7 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
         println!("erro ao iniciar conexao para o proxy ");
         return Ok(());
     }
+
     let server_stream = server_connect?;
 
     let (client_read, client_write) = client_stream.into_split();
