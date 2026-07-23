@@ -1,7 +1,7 @@
 #!/bin/bash
-# SDProxy Installer - Professional Version v2.2
+# SDProxy Installer - Version v2.2
 
-REPO_URL="https://github.com/PedroJbk/SDProxy2.git"
+REPO_URL="https://github.com/PedroJbk/SDProxy.git"
 REPO_BRANCH="main"
 CMD_NAME="sdproxy"
 TOTAL_STEPS=7
