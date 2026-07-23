@@ -192,7 +192,7 @@ fn get_port() -> u16 {
 
 fn get_status() -> String {
     let args: Vec<String> = env::args().collect();
-    let mut status = String::from("SSHPRO");
+    let mut status = String::from("@SDProxy");
 
     for i in 1..args.len() {
         if args[i] == "--status" || args[i] == "-s" {

@@ -75,17 +75,13 @@ async fn handle_client(
     let first_byte = peek_buf[0];
 
     if first_byte == 0x16 {
-        println!("[SDProxy] TLS detectado (0x{:02x}) — TLS termination", first_byte);
         return handle_tls_connection(stream, status, ssh_port).await;
     }
 
     if first_byte == 0x47 || first_byte == 0x50 || first_byte == 0x48 || first_byte == 0x43 {
-        println!("[SDProxy] HTTP direto detectado (0x{:02x})", first_byte);
         return handle_http_raw(stream, status, ssh_port).await;
     }
 
-    // Dados raw — tratar como SSH/VPN tunnel direto
-    println!("[SDProxy] Dados raw (0x{:02x}), tratando como SSH tunnel...", first_byte);
     handle_raw_tunnel(stream, ssh_port).await
 }
 
@@ -97,15 +93,13 @@ async fn handle_tls_connection(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
-    println!("[SDProxy][TLS] Handshake...");
-
     let cert_path = "/opt/sdproxy/cert.pem";
     let key_path = "/opt/sdproxy/key.pem";
 
     let config = match build_tls_config(cert_path, key_path) {
         Ok(c) => c,
         Err(e) => {
-            println!("[SDProxy][TLS] Erro config: {}. Verifique /opt/sdproxy/cert.pem e key.pem", e);
+            println!("[SDProxy][TLS] Erro config: {}", e);
             return Ok(());
         }
     };
@@ -119,9 +113,6 @@ async fn handle_tls_connection(
         }
     };
 
-    println!("[SDProxy][TLS] Handshake OK");
-
-    // Ler request HTTP dentro do TLS
     let (mut tls_read, tls_write) = tokio::io::split(tls_stream);
 
     let mut http_buf = Vec::new();
@@ -157,61 +148,45 @@ async fn handle_tls_connection(
                     }
                 }
             }
-            _ => {
-                println!("[SDProxy][TLS] Timeout lendo HTTP");
-                return Ok(());
-            }
+            _ => break,
         }
+    }
+
+    if http_buf.is_empty() {
+        let tls_combined = tls_read.unsplit(tls_write);
+        return handle_raw_tunnel_tls(tls_combined, ssh_port).await;
     }
 
     let http_str = String::from_utf8_lossy(&http_buf);
     let (method, path) = match parse_http_request(&http_str) {
         Some(m) => m,
         None => {
-            println!("[SDProxy][TLS] Falha parsear HTTP: {:?}", &http_str[..http_str.len().min(200)]);
-            return Ok(());
+            let tls_combined = tls_read.unsplit(tls_write);
+            return handle_raw_tunnel_tls(tls_combined, ssh_port).await;
         }
     };
 
-    println!("[SDProxy][TLS] {} {}", method, path);
-
     let tls_combined = tls_read.unsplit(tls_write);
 
-    // Rotear: xHTTP SplitHTTP ou SSL Tunnel
     if is_xhttp_path(&path) {
-        println!("[SDProxy][TLS] → xHTTP SplitHTTP");
         match method.as_str() {
             "GET" => handle_xhttp_get(tls_combined, &path, status, ssh_port).await,
             "POST" => handle_xhttp_post(tls_combined, &http_str, &path, status).await,
-            other => {
-                println!("[SDProxy][TLS] Método não suportado: {}", other);
-                Ok(())
-            }
+            _ => Ok(()),
         }
     } else {
-        println!("[SDProxy][TLS] → SSL TUNNEL");
         handle_ssl_tunnel_after_tls(tls_combined, &http_str, status, ssh_port).await
     }
 }
 
-/// Verifica se o path é de xHTTP
 fn is_xhttp_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
-    // /ssh/... é sempre xHTTP
     if p.starts_with("ssh/") || p == "ssh" {
         return true;
     }
-    // Path com session_id (ex: /revive-xxx/0 ou /abc123)
     let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() >= 1 && !parts[0].is_empty() && parts.len() <= 2 {
-        // Se tem pelo menos 2 componentes (session_id + seq), é xHTTP
-        if parts.len() >= 2 {
-            return true;
-        }
-        // Se tem 1 componente e parece um session_id (não é path comum)
-        // Qualquer path que não é vazio é tratado como xHTTP para compatibilidade
-        // (o antigo comportamento tratava "/" como xHTTP com session_id gerado)
-        if !parts[0].contains('.') && !parts[0].contains('?') && parts[0].len() > 3 {
+    if parts.len() >= 1 && !parts[0].is_empty() {
+        if parts[0].starts_with("revive-") {
             return true;
         }
     }
@@ -220,7 +195,6 @@ fn is_xhttp_path(path: &str) -> bool {
 
 // ═══════════════════════════════════════════════════════════════
 // SSL TUNNEL (após TLS termination)
-// Injector: TLS handshake → HTTP GET → 200 OK → SSH bridge
 // ═══════════════════════════════════════════════════════════════
 async fn handle_ssl_tunnel_after_tls(
     mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
@@ -228,43 +202,44 @@ async fn handle_ssl_tunnel_after_tls(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
-    println!("[SDProxy][SSL-TUNNEL] Enviando HTTP/1.1 200 OK...");
-
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-         Content-Length: 0\r\n\
-         Connection: keep-alive\r\n\
-         X-Status: {}\r\n\
-         \r\n",
-        status
-    );
-    stream.write_all(resp.as_bytes()).await?;
+    // Primeiro envia 101 com o status correto
+    let resp101 = format!("HTTP/1.1 101 ({})\r\n\r\n", status);
+    stream.write_all(resp101.as_bytes()).await?;
+    
+    // Depois envia 200 com o status correto
+    let resp200 = format!("HTTP/1.1 200 ({})\r\n\r\n", status);
+    stream.write_all(resp200.as_bytes()).await?;
     stream.flush().await?;
-
-    println!("[SDProxy][SSL-TUNNEL] 200 OK enviado, conectando SSH...");
 
     let ssh_addr = format!("127.0.0.1:{}", ssh_port);
     match TcpStream::connect(&ssh_addr).await {
         Ok(mut ssh_stream) => {
-            println!("[SDProxy][SSL-TUNNEL] SSH:{} conectado", ssh_port);
             let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
-            println!("[SDProxy][SSL-TUNNEL] Tunnel encerrado");
             Ok(())
         }
-        Err(e) => {
-            println!("[SDProxy][SSL-TUNNEL] SSH falhou: {}, tentando VPN:1194...", e);
+        Err(_) => {
             match TcpStream::connect("127.0.0.1:1194").await {
                 Ok(mut vpn_stream) => {
                     let _ = copy_bidirectional(&mut stream, &mut vpn_stream).await;
-                    println!("[SDProxy][SSL-TUNNEL] Tunnel VPN encerrado");
                     Ok(())
                 }
-                Err(e2) => {
-                    println!("[SDProxy][SSL-TUNNEL] Ambos falharam: {} / {}", e, e2);
-                    Ok(())
-                }
+                Err(_) => Ok(()),
             }
         }
+    }
+}
+
+async fn handle_raw_tunnel_tls(
+    mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
+    ssh_port: u16,
+) -> Result<(), Error> {
+    let ssh_addr = format!("127.0.0.1:{}", ssh_port);
+    match TcpStream::connect(&ssh_addr).await {
+        Ok(mut ssh_stream) => {
+            let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
+            Ok(())
+        }
+        Err(_) => Ok(()),
     }
 }
 
@@ -283,24 +258,13 @@ async fn handle_http_raw(
     };
 
     let http_str = String::from_utf8_lossy(&buf[..n]);
-
     let header_end = http_str.find("\r\n\r\n").unwrap_or(0);
-    let header_str = if header_end > 0 {
-        &http_str[..header_end]
-    } else {
-        &http_str
-    };
+    let header_str = if header_end > 0 { &http_str[..header_end] } else { &http_str };
 
     let (method, path) = match parse_http_request(header_str) {
         Some(m) => m,
-        None => {
-            // Não é HTTP válido — raw tunnel direto
-            println!("[SDProxy][RAW] Dados raw, tunnel SSH direto...");
-            return handle_raw_tunnel_with_data(buf[..n].to_vec(), stream, ssh_port).await;
-        }
+        None => return handle_raw_tunnel_with_data(buf[..n].to_vec(), stream, ssh_port).await,
     };
-
-    println!("[SDProxy][RAW] {} {}", method, path);
 
     if is_xhttp_path(&path) {
         match method.as_str() {
@@ -309,17 +273,11 @@ async fn handle_http_raw(
             _ => Ok(()),
         }
     } else {
-        // SSL Tunnel via HTTP
-        println!("[SDProxy][RAW] → SSL TUNNEL (HTTP)");
-        let resp = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Length: 0\r\n\
-             Connection: keep-alive\r\n\
-             X-Status: {}\r\n\
-             \r\n",
-            status
-        );
-        stream.write_all(resp.as_bytes()).await?;
+        let resp101 = format!("HTTP/1.1 101 ({})\r\n\r\n", status);
+        stream.write_all(resp101.as_bytes()).await?;
+        
+        let resp200 = format!("HTTP/1.1 200 ({})\r\n\r\n", status);
+        stream.write_all(resp200.as_bytes()).await?;
         stream.flush().await?;
 
         let ssh_addr = format!("127.0.0.1:{}", ssh_port);
@@ -328,23 +286,11 @@ async fn handle_http_raw(
                 let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
                 Ok(())
             }
-            Err(e) => {
-                match TcpStream::connect("127.0.0.1:1194").await {
-                    Ok(mut vpn_stream) => {
-                        let _ = copy_bidirectional(&mut stream, &mut vpn_stream).await;
-                        Ok(())
-                    }
-                    Err(e2) => {
-                        println!("[SDProxy][RAW-TUNNEL] Ambos falharam: {} / {}", e, e2);
-                        Ok(())
-                    }
-                }
-            }
+            Err(_) => Ok(()),
         }
     }
 }
 
-/// Raw tunnel com dados iniciais
 async fn handle_raw_tunnel_with_data(
     initial_data: Vec<u8>,
     mut stream: TcpStream,
@@ -358,24 +304,10 @@ async fn handle_raw_tunnel_with_data(
             let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
             Ok(())
         }
-        Err(e) => {
-            match TcpStream::connect("127.0.0.1:1194").await {
-                Ok(mut vpn_stream) => {
-                    vpn_stream.write_all(&initial_data).await?;
-                    vpn_stream.flush().await?;
-                    let _ = copy_bidirectional(&mut stream, &mut vpn_stream).await;
-                    Ok(())
-                }
-                Err(e2) => {
-                    println!("[SDProxy][RAW] Ambos falharam: {} / {}", e, e2);
-                    Ok(())
-                }
-            }
-        }
+        Err(_) => Ok(()),
     }
 }
 
-/// Raw tunnel direto
 async fn handle_raw_tunnel(
     mut stream: TcpStream,
     ssh_port: u16,
@@ -386,18 +318,7 @@ async fn handle_raw_tunnel(
             let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
             Ok(())
         }
-        Err(e) => {
-            match TcpStream::connect("127.0.0.1:1194").await {
-                Ok(mut vpn_stream) => {
-                    let _ = copy_bidirectional(&mut stream, &mut vpn_stream).await;
-                    Ok(())
-                }
-                Err(e2) => {
-                    println!("[SDProxy][RAW] Ambos falharam: {} / {}", e, e2);
-                    Ok(())
-                }
-            }
-        }
+        Err(_) => Ok(()),
     }
 }
 
@@ -411,8 +332,6 @@ async fn handle_xhttp_get(
     ssh_port: u16,
 ) -> Result<(), Error> {
     let mut session_id = extract_session_id(path);
-    println!("[SDProxy][xHTTP-GET] Path: {} Session: {}", path, session_id);
-
     if session_id.is_empty() {
         session_id = format!("revive-{}", std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -420,17 +339,14 @@ async fn handle_xhttp_get(
             .as_millis());
     }
 
-    println!("[SDProxy][xHTTP-GET] Conectando SSH 127.0.0.1:{}...", ssh_port);
     let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
         Ok(s) => s,
-        Err(e) => {
-            println!("[SDProxy][xHTTP-GET] SSH falhou: {}", e);
+        Err(_) => {
             let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Status: {}\r\nContent-Length: 0\r\n\r\n", status);
             stream.write_all(resp.as_bytes()).await?;
             return Ok(());
         }
     };
-    println!("[SDProxy][xHTTP-GET] SSH conectado!");
 
     let (ssh_r, ssh_w) = ssh_stream.into_split();
     let ssh_r = Arc::new(Mutex::new(ssh_r));
@@ -476,8 +392,6 @@ async fn handle_xhttp_get(
         let mut sessions = SESSIONS.lock().await;
         sessions.remove(&session_id);
     }
-
-    println!("[SDProxy][xHTTP-GET] Fim session {}", session_id);
     Ok(())
 }
 
@@ -490,10 +404,7 @@ async fn handle_xhttp_post(
     path: &str,
     status: &str,
 ) -> Result<(), Error> {
-    let (session_id, sequence) = parse_post_path(path);
-
-    println!("[SDProxy][xHTTP-POST] Session: {} Seq: {}", session_id, sequence);
-
+    let (session_id, _sequence) = parse_post_path(path);
     let content_length = extract_content_length(full_request).unwrap_or(0);
 
     if content_length == 0 {
@@ -508,24 +419,14 @@ async fn handle_xhttp_post(
         match timeout(Duration::from_secs(30), stream.read(&mut body_buf[total_read..])).await {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => total_read += n,
-            Ok(Err(e)) => { println!("[SDProxy][xHTTP-POST] Erro: {}", e); break; }
-            Err(_) => { println!("[SDProxy][xHTTP-POST] Timeout"); break; }
+            _ => break,
         }
     }
 
     let sessions = SESSIONS.lock().await;
     if let Some(session) = sessions.get(&session_id) {
         let mut write_guard = session.ssh_write.lock().await;
-        if write_guard.write_all(&body_buf[..total_read]).await.is_err() {
-            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
-            let _ = stream.write_all(resp.as_bytes()).await;
-            return Ok(());
-        }
-    } else {
-        println!("[SDProxy][xHTTP-POST] Sessão {} não encontrada!", session_id);
-        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        let _ = stream.write_all(resp.as_bytes()).await;
-        return Ok(());
+        let _ = write_guard.write_all(&body_buf[..total_read]).await;
     }
 
     let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
@@ -534,7 +435,6 @@ async fn handle_xhttp_post(
     Ok(())
 }
 
-/// xHTTP POST raw (sem TLS)
 async fn handle_xhttp_post_raw(
     mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
     full_request: &str,
@@ -542,7 +442,6 @@ async fn handle_xhttp_post_raw(
     status: &str,
 ) -> Result<(), Error> {
     let (session_id, _sequence) = parse_post_path(path);
-
     let content_length = extract_content_length(full_request).unwrap_or(0);
 
     if content_length == 0 {
@@ -594,30 +493,18 @@ async fn send_to_ssh(session_id: String, data: &[u8]) {
 fn parse_http_request(data: &str) -> Option<(String, String)> {
     let first_line = data.lines().next()?;
     let parts: Vec<&str> = first_line.split_whitespace().collect();
-    if parts.len() >= 2 {
-        Some((parts[0].to_string(), parts[1].to_string()))
-    } else {
-        None
-    }
+    if parts.len() >= 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
 }
 
 fn extract_session_id(path: &str) -> String {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    if parts.is_empty() || (parts.len() == 1 && parts[0].is_empty()) {
-        return String::new();
-    }
-    if parts[0] == "ssh" {
-        if parts.len() >= 2 { parts[1].to_string() } else { String::new() }
-    } else {
-        parts[0].to_string()
-    }
+    if parts.is_empty() || (parts.len() == 1 && parts[0].is_empty()) { return String::new(); }
+    if parts[0] == "ssh" { if parts.len() >= 2 { parts[1].to_string() } else { String::new() } } else { parts[0].to_string() }
 }
 
 fn parse_post_path(path: &str) -> (String, String) {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    if parts.is_empty() || (parts.len() == 1 && parts[0].is_empty()) {
-        return (String::new(), "0".to_string());
-    }
+    if parts.is_empty() || (parts.len() == 1 && parts[0].is_empty()) { return (String::new(), "0".to_string()); }
     if parts[0] == "ssh" {
         let sid = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
         let seq = if parts.len() >= 3 { parts[2].to_string() } else { "0".to_string() };
@@ -632,9 +519,7 @@ fn parse_post_path(path: &str) -> (String, String) {
 fn extract_content_length(data: &str) -> Option<usize> {
     for line in data.lines() {
         let lower = line.to_lowercase();
-        if lower.starts_with("content-length:") {
-            return line.split(':').nth(1)?.trim().parse().ok();
-        }
+        if lower.starts_with("content-length:") { return line.split(':').nth(1)?.trim().parse().ok(); }
     }
     None
 }
@@ -644,65 +529,30 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
     let key_file = std::fs::File::open(key_path)?;
     let mut cert_reader = std::io::BufReader::new(cert_file);
     let mut key_reader = std::io::BufReader::new(key_file);
-
-    let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?
-        .into_iter()
-        .map(Certificate)
-        .collect();
-
-    let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?
-        .into_iter()
-        .map(PrivateKey)
-        .collect();
-
-    if certs.is_empty() || keys.is_empty() {
-        return Err(Error::new(std::io::ErrorKind::Other, "Certs ou keys vazios"));
-    }
-
-    let config = rustls::ServerConfig::builder()
-        .with_safe_defaults()
-        .with_no_client_auth()
-        .with_single_cert(certs, keys.into_iter().next().unwrap())
-        .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
-
+    let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?.into_iter().map(Certificate).collect();
+    let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?.into_iter().map(PrivateKey).collect();
+    if certs.is_empty() || keys.is_empty() { return Err(Error::new(std::io::ErrorKind::Other, "Certs ou keys vazios")); }
+    let config = rustls::ServerConfig::builder().with_safe_defaults().with_no_client_auth().with_single_cert(certs, keys.into_iter().next().unwrap()).map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
     Ok(config)
 }
 
 fn get_port() -> u16 {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 443;
-    for i in 1..args.len() {
-        if args[i] == "--port" || args[i] == "-p" {
-            if i + 1 < args.len() {
-                port = args[i + 1].parse().unwrap_or(443);
-            }
-        }
-    }
+    for i in 1..args.len() { if args[i] == "--port" || args[i] == "-p" { if i + 1 < args.len() { port = args[i + 1].parse().unwrap_or(443); } } }
     port
 }
 
 fn get_status() -> String {
     let args: Vec<String> = std::env::args().collect();
     let mut status = String::from("@SDProxy");
-    for i in 1..args.len() {
-        if args[i] == "--status" || args[i] == "-s" {
-            if i + 1 < args.len() {
-                status = args[i + 1].clone();
-            }
-        }
-    }
+    for i in 1..args.len() { if args[i] == "--status" || args[i] == "-s" { if i + 1 < args.len() { status = args[i + 1].clone(); } } }
     status
 }
 
 fn get_ssh_port() -> u16 {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 22;
-    for i in 1..args.len() {
-        if args[i] == "--ssh-port" {
-            if i + 1 < args.len() {
-                port = args[i + 1].parse().unwrap_or(22);
-            }
-        }
-    }
+    for i in 1..args.len() { if args[i] == "--ssh-port" { if i + 1 < args.len() { port = args[i + 1].parse().unwrap_or(22); } } }
     port
 }
