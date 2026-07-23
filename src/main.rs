@@ -40,105 +40,40 @@ async fn start_http(listener: TcpListener) {
 }
 
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
-    // PEEK primeiro byte para detectar TLS
-    let mut peek_buf = [0u8; 1];
-    let peek_result = timeout(Duration::from_secs(10), client_stream.peek(&mut peek_buf)).await;
-    let first_byte = match peek_result {
-        Ok(Ok(1)) => peek_buf[0],
-        _ => 0x00,
-    };
-
-    // Se é TLS (0x16 = ClientHello), faz passthrough direto para SSH
-    if first_byte == 0x16 {
-        return handle_tls_passthrough(client_stream).await;
-    }
-
-    // Caso contrário, usa o padrão BSProxy (101 -> read -> 200 -> tunnel)
-    handle_bsproxy(client_stream).await
-}
-
-/// TLS Passthrough - encaminha direto para SSH (127.0.0.1:22)
-/// O SSH recebe o TLS handshake, decodifica e processa
-async fn handle_tls_passthrough(mut client_stream: TcpStream) -> Result<(), Error> {
-    let ssh_stream = TcpStream::connect("127.0.0.1:22").await;
-    if ssh_stream.is_err() {
-        println!("TLS Passthrough: SSH nao disponivel em 127.0.0.1:22");
-        return Ok(());
-    }
-    let mut server_stream = ssh_stream?;
-
-    let (client_read, client_write) = client_stream.into_split();
-    let (server_read, server_write) = server_stream.into_split();
-
-    let client_read = Arc::new(Mutex::new(client_read));
-    let client_write = Arc::new(Mutex::new(client_write));
-    let server_read = Arc::new(Mutex::new(server_read));
-    let server_write = Arc::new(Mutex::new(server_write));
-
-    let c2s = transfer_data(client_read, server_write);
-    let s2c = transfer_data(server_read, client_write);
-
-    tokio::try_join!(c2s, s2c)?;
-    Ok(())
-}
-
-/// BSProxy padrão - funciona em portas 80, 8080
-async fn handle_bsproxy(mut client_stream: TcpStream) -> Result<(), Error> {
     let status = get_status();
 
-    // Detectar se é TLS (0x16) antes de qualquer resposta HTTP
-    let mut first_byte = [0u8; 1];
-    let peek_res = timeout(Duration::from_millis(500), client_stream.peek(&mut first_byte)).await;
-    
-    if let Ok(Ok(1)) = peek_res {
-        if first_byte[0] == 0x16 {
-            // É TLS! Fazer passthrough direto para o SSH (porta 22)
-            // Isso corrige o erro de "Premature connection close" em conexões SSL/TLS
-            let server_connect = TcpStream::connect("127.0.0.1:22").await;
-            if let Ok(server_stream) = server_connect {
-                let (mut cr, mut cw) = client_stream.into_split();
-                let (mut sr, mut sw) = server_stream.into_split();
-                let _ = tokio::try_join!(
-                    tokio::io::copy(&mut cr, &mut sw),
-                    tokio::io::copy(&mut sr, &mut cw)
-                );
-            }
-            return Ok(());
-        }
-    }
-
-    // Se não for TLS, segue o fluxo legado (HTTP Injection)
-    // SEMPRE envia 101 primeiro
+    // SEMPRE envia 101 primeiro (lógica do AWProxy)
     client_stream
         .write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes())
         .await?;
 
     // SEMPRE le do cliente
     let mut buffer = vec![0; 1024];
-    let _ = client_stream.read(&mut buffer).await?;
+    client_stream.read(&mut buffer).await?;
 
     // SEMPRE envia 200
     client_stream
         .write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes())
         .await?;
 
-    // Detecta SSH vs VPN pelo peek
-    let mut addr_proxy = "127.0.0.1:22";
-    let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await
-        .unwrap_or_else(|_| Ok(String::new()));
-
-    if let Ok(data) = result {
-        if !data.contains("SSH") && !data.is_empty() {
-            addr_proxy = "127.0.0.1:1194";
+    // Detecta SSH vs VPN pelo peek (lógica do AWProxy)
+    let addr_proxy = if let Ok(data) = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await
+        .unwrap_or_else(|_| Ok(String::new()))
+    {
+        if data.contains("SSH") || data.is_empty() {
+            "0.0.0.0:22"
+        } else {
+            "0.0.0.0:1194"
         }
-    }
+    } else {
+        "0.0.0.0:22"
+    };
 
     let server_connect = TcpStream::connect(addr_proxy).await;
     if server_connect.is_err() {
         println!("erro ao iniciar conexao para o proxy ");
         return Ok(());
     }
-
     let server_stream = server_connect?;
 
     let (client_read, client_write) = client_stream.into_split();
