@@ -51,7 +51,7 @@ async fn main() -> Result<(), Error> {
 }
 
 async fn handle_xhttp_client(
-    mut stream: TcpStream,
+    stream: TcpStream,
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
@@ -62,6 +62,10 @@ async fn handle_xhttp_client(
         Ok(Ok(n)) => n,
         _ => return Ok(()),
     };
+
+    if bytes_peeked == 0 {
+        return Ok(());
+    }
 
     let first_byte = peek_buf[0];
     println!("[xHTTP] Conexão: first_byte=0x{:02x} bytes={}", first_byte, bytes_peeked);
@@ -184,33 +188,6 @@ async fn handle_tls_xhttp(
     }
 }
 
-async fn handle_http_xhttp(
-    mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
-    first_bytes: &[u8],
-    status: &str,
-    ssh_port: u16,
-) -> Result<(), Error> {
-    let mut buf = first_bytes.to_vec();
-    let mut rest = vec![0u8; 16384];
-    let rest_n = match timeout(Duration::from_secs(5), stream.read(&mut rest)).await {
-        Ok(Ok(n)) => n,
-        _ => 0,
-    };
-    buf.extend_from_slice(&rest[..rest_n]);
-
-    let http_str = String::from_utf8_lossy(&buf);
-    let (method, path) = match parse_http_request(&http_str) {
-        Some(m) => m,
-        None => return Ok(()),
-    };
-
-    match method.as_str() {
-        "GET" => handle_xhttp_get(stream, &path, status, ssh_port).await,
-        "POST" => handle_xhttp_post(stream, &http_str, &path, status).await,
-        _ => Ok(()),
-    }
-}
-
 /// Handle dados raw TCP como HTTP puro (sem TLS)
 async fn handle_http_xhttp_raw(
     mut stream: TcpStream,
@@ -260,10 +237,9 @@ async fn handle_xhttp_post_raw(
     path: &str,
     status: &str,
 ) -> Result<(), Error> {
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    let session_id = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
+    let (session_id, sequence) = parse_post_path(path);
 
-    println!("[xHTTP POST] Session: {}", session_id);
+    println!("[xHTTP POST] Session: {} Seq: {}", session_id, sequence);
 
     let content_length = extract_content_length(full_request).unwrap_or(0);
 
@@ -306,7 +282,7 @@ async fn handle_xhttp_post_raw(
 
 /// Enviar dados para a sessão SSH
 async fn send_to_ssh(session_id: String, data: &[u8]) {
-    let mut sessions = SESSIONS.lock().await;
+    let sessions = SESSIONS.lock().await;
     if let Some(session) = sessions.get(&session_id) {
         let mut write_guard = session.ssh_write.lock().await;
         let _ = write_guard.write_all(data).await;
@@ -323,13 +299,16 @@ async fn handle_xhttp_get(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
-    let session_id = extract_session_id(path);
+    let mut session_id = extract_session_id(path);
     println!("[xHTTP GET] Path: {} Session: {}", path, session_id);
 
+    // Se o session_id estiver vazio, geramos um (comum no SocksRevive se o path for /)
     if session_id.is_empty() {
-        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        stream.write_all(resp.as_bytes()).await?;
-        return Ok(());
+        session_id = format!("revive-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis());
+        println!("[xHTTP GET] Session ID gerado: {}", session_id);
     }
 
     // Conectar ao SSH backend
@@ -408,9 +387,7 @@ async fn handle_xhttp_post(
     path: &str,
     status: &str,
 ) -> Result<(), Error> {
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    let session_id = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
-    let sequence = if parts.len() >= 3 { parts[2] } else { "0" };
+    let (session_id, sequence) = parse_post_path(path);
 
     println!("[xHTTP POST] Session: {} Seq: {}", session_id, sequence);
 
@@ -477,12 +454,39 @@ fn parse_http_request(data: &str) -> Option<(String, String)> {
 
 fn extract_session_id(path: &str) -> String {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    if parts.len() >= 2 {
-        parts[1].to_string()
-    } else if parts.len() == 1 && !parts[0].is_empty() {
-        parts[0].to_string()
+    if parts.is_empty() || (parts.len() == 1 && parts[0].is_empty()) {
+        return String::new();
+    }
+    
+    // Se o primeiro componente for 'ssh', o session_id é o segundo
+    if parts[0] == "ssh" {
+        if parts.len() >= 2 {
+            parts[1].to_string()
+        } else {
+            String::new()
+        }
     } else {
-        String::new()
+        // Caso contrário, o primeiro componente é o session_id
+        parts[0].to_string()
+    }
+}
+
+fn parse_post_path(path: &str) -> (String, String) {
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if parts.is_empty() || (parts.len() == 1 && parts[0].is_empty()) {
+        return (String::new(), "0".to_string());
+    }
+
+    if parts[0] == "ssh" {
+        // /ssh/{session_id}/{sequence}
+        let sid = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
+        let seq = if parts.len() >= 3 { parts[2].to_string() } else { "0".to_string() };
+        (sid, seq)
+    } else {
+        // /{session_id}/{sequence}
+        let sid = parts[0].to_string();
+        let seq = if parts.len() >= 2 { parts[1].to_string() } else { "0".to_string() };
+        (sid, seq)
     }
 }
 
