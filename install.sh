@@ -47,7 +47,7 @@ echo -e "${BLUE}${BOLD} ╚════██║██║  ██║██╔═
 echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
 echo -e "${BLUE}${BOLD} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
-log_info "Iniciando instalação do SDProxy v2.2..."
+log_info "Iniciando instalação do SDProxy v2.3..."
 
 # --- Etapa 1 ---
 show_progress "Atualizando repositórios e instalando dependências..."
@@ -125,11 +125,11 @@ rm -rf /root/SDProxy
 rm -f /tmp/sdproxy_build.log
 
 # --- Etapa 7 ---
-log_success "Instalação do SDProxy v2.2 concluída!"
+log_success "Instalação do SDProxy v2.3 concluída!"
 echo ""
 echo -e "${BLUE}${BOLD}  Binários:${NC}"
 echo -e "  /opt/sdproxy/proxy       → Proxy BSProxy (80, 8080, 443)"
-echo -e "  /opt/sdproxy/proxy-xhttp → xHTTP SplitHTTP (443)"
+echo -e "  /opt/sdproxy/proxy-xhttp → xHTTP SplitHTTP + SSL Tunnel (443)"
 echo ""
 echo -e "${BLUE}${BOLD}  Comandos:${NC}"
 echo -e "  sdproxy                  → Menu (opção [04] = xHTTP)"

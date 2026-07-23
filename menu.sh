@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ============================================
-# SDProxy Menu - Free v2.2
+# SDProxy Menu - Free v2.3
 # ============================================
 
 SDPROXY="/opt/sdproxy/proxy"
@@ -16,6 +16,7 @@ CYAN='\033[0;36m'
 WHITE='\033[0;37m'
 BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
+BOLD='\033[1m'
 NC='\033[0m'
 
 # ============================================
@@ -32,44 +33,67 @@ show_banner() {
 }
 
 # ============================================
+# Mostrar portas ativas (organizado)
+# ============================================
+show_active_ports() {
+    ACTIVE=""
+    XHTTP_ACTIVE=false
+
+    # Verificar portas padrão (proxy-*)
+    for service_file in ${SYSTEMD_DIR}/proxy-*.service; do
+        if [ -f "$service_file" ]; then
+            PORT=$(basename "$service_file" .service | sed 's/proxy-//')
+            if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
+                if [ "$PORT" = "443" ]; then
+                    XHTTP_ACTIVE=true
+                else
+                    ACTIVE="$ACTIVE $PORT"
+                fi
+            fi
+        fi
+    done
+
+    # Montar linha de portas
+    echo -ne "${CYAN}║ ${YELLOW}Porta(s) ativa(s):${NC}"
+    echo -ne "${WHITE}"
+    if [ -n "$ACTIVE" ]; then
+        echo -ne "${YELLOW}${ACTIVE}${NC}"
+    fi
+    if [ "$XHTTP_ACTIVE" = true ]; then
+        if [ -n "$ACTIVE" ]; then
+            echo -ne " ${WHITE}443"
+        else
+            echo -ne "${YELLOW}443${NC}"
+        fi
+    fi
+    if [ -z "$ACTIVE" ] && [ "$XHTTP_ACTIVE" = false ]; then
+        echo -ne "${RED}nenhuma${NC}"
+    fi
+    echo -ne "${CYAN}                             ║${NC}"
+    echo ""
+}
+
+# ============================================
 # Menu Principal
 # ============================================
 show_menu() {
     clear
     show_banner
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║       SDProxy Menu Free v2.2     ║${NC}"
-    echo -e "${CYAN}╠══════════════════════════════════╣${NC}"
-    echo -e "${CYAN}║                                  ║${NC}"
-    echo -e "${CYAN}║ ${WHITE}[01]${NC} - ABRIR PORTA               ${CYAN}║${NC}"
-    echo -e "${CYAN}║ ${WHITE}[02]${NC} - FECHAR PORTA              ${CYAN}║${NC}"
-    echo -e "${CYAN}║ ${WHITE}[03]${NC} - REINICIAR PORTA           ${CYAN}║${NC}"
-    echo -e "${CYAN}║ ${MAGENTA}[04]${NC} - xHTTP SPLITHTTP (${GREEN}443${NC})  ${CYAN}║${NC}"
-    echo -e "${CYAN}║                                  ║${NC}"
-    echo -e "${CYAN}║ ${WHITE}[00]${NC} - SAIR                      ${CYAN}║${NC}"
-    echo -e "${CYAN}║                                  ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║        SDProxy Menu Free v2.3            ║${NC}"
+    echo -e "${CYAN}╠══════════════════════════════════════════╣${NC}"
+    show_active_ports
+    echo -e "${CYAN}╠══════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║ ${WHITE}[01]${NC} - ABRIR PORTA                    ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${WHITE}[02]${NC} - FECHAR PORTA                   ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${WHITE}[03]${NC} - REINICIAR PORTA                ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${MAGENTA}[04]${NC} - xHTTP_SSH / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}  ${CYAN}║${NC}"
+    echo -e "${CYAN}║                                              ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${WHITE}[00]${NC} - SAIR                           ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
     echo -n "Escolha uma opção: "
-}
-
-show_active_ports() {
-    ACTIVE=""
-    for service_file in ${SYSTEMD_DIR}/proxy-*.service; do
-        if [ -f "$service_file" ]; then
-            PORT=$(basename "$service_file" .service | sed 's/proxy-//')
-            if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-                ACTIVE="$ACTIVE $PORT"
-            fi
-        fi
-    done
-    if [ -n "$ACTIVE" ]; then
-        echo -e "Porta(s) ativa(s):${YELLOW}${ACTIVE}${NC}"
-    else
-        echo -e "Porta(s) ativa(s):${RED} nenhuma${NC}"
-    fi
-    echo ""
 }
 
 # ============================================
@@ -79,12 +103,14 @@ open_port() {
     clear
     show_banner
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║         Abrir Porta               ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║           Abrir Porta                    ║${NC}"
+    echo -e "${CYAN}╠══════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║ ${WHITE}Portas padrão: 80, 8080, 8880, 3128${NC}     ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${YELLOW}Porta 443: use opção [04] xHTTP/SSL${NC}    ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
-    # Se a porta for 443, redirecionar para xHTTP
     read -p "Porta: " PORT
     if [[ -z "$PORT" ]]; then
         echo -e "${RED}Porta inválida!${NC}"
@@ -93,7 +119,7 @@ open_port() {
     fi
 
     if [[ "$PORT" == "443" ]]; then
-        echo -e "${YELLOW}Para porta 443, use a opção [04] xHTTP SplitHTTP.${NC}"
+        echo -e "${YELLOW}Para porta 443, use a opção [04] xHTTP_SSH / SSL TUNNEL.${NC}"
         read -p "Enter pra continuar..."
         return
     fi
@@ -141,7 +167,9 @@ open_port() {
     sleep 2
 
     if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        echo -e "${GREEN}Proxy iniciado na porta ${PORT}.${NC}"
+        echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
+        echo -e "${GREEN}║  Proxy iniciado na porta ${PORT}            ║${NC}"
+        echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
     else
         echo -e "${RED}Falha ao iniciar o proxy na porta ${PORT}!${NC}"
         echo -e "${YELLOW}Verifique: journalctl -u proxy-${PORT}.service${NC}"
@@ -152,27 +180,21 @@ open_port() {
 }
 
 # ============================================
-# xHTTP SplitHTTP - Opção Exclusiva Porta 443
+# xHTTP SplitHTTP + SSL TUNNEL - Porta 443
 # ============================================
 open_xhttp() {
     clear
     show_banner
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║  xHTTP SplitHTTP - Porta 443     ║${NC}"
-    echo -e "${CYAN}║  (SocksRevive-XHTTP-DEMO)       ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║  xHTTP_SSH / SSL TUNNEL - Porta 443      ║${NC}"
+    echo -e "${CYAN}╠══════════════════════════════════════════╣${NC}"
+    echo -e "${CYAN}║ ${WHITE}Protocolos suportados:                   ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${GREEN}• xHTTP SplitHTTP${NC} (SocksRevive)       ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${GREEN}• SSL TUNNEL${NC} (HTTP Injector)         ${CYAN}║${NC}"
+    echo -e "${CYAN}║ ${GREEN}• HTTP direto${NC} (qualquer client)     ${CYAN}║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${YELLOW}┌─────────────────────────────────────────────┐${NC}"
-    echo -e "${YELLOW}│  Protocolo xHTTP (SplitHTTP)               │${NC}"
-    echo -e "${YELLOW}│  - TLS obrigatório na porta 443            │${NC}"
-    echo -e "${YELLOW}│  - Compatível SocksRevive-XHTTP-DEMO      │${NC}"
-    echo -e "${YELLOW}│  - GET = downlink (streaming)              │${NC}"
-    echo -e "${YELLOW}│  - POST = uplink (dados SSH)               │${NC}"
-    echo -e "${YELLOW}└─────────────────────────────────────────────┘${NC}"
-    echo ""
-
-    PORT="443"
 
     if systemctl is-active --quiet "proxy-443.service" 2>/dev/null; then
         echo -e "${RED}Porta 443 já está em uso!${NC}"
@@ -193,6 +215,11 @@ open_xhttp() {
         STATUS="@SDProxy"
     fi
 
+    read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
+    if [[ -z "$SSH_PORT" ]]; then
+        SSH_PORT="22"
+    fi
+
     # Gerar certificados se não existirem
     echo -e "${GREEN}Verificando certificados TLS...${NC}"
     if [ ! -f "/opt/sdproxy/cert.pem" ] || [ ! -f "/opt/sdproxy/key.pem" ]; then
@@ -206,17 +233,17 @@ open_xhttp() {
     fi
 
     echo ""
-    echo -e "${GREEN}Configuração xHTTP SplitHTTP:${NC}"
-    echo -e "  Porta: ${YELLOW}${PORT}${NC}"
+    echo -e "${GREEN}Configuração:${NC}"
+    echo -e "  Porta: ${YELLOW}443${NC}"
     echo -e "  TLS: ${GREEN}OBRIGATÓRIO (auto-assinado)${NC}"
-    echo -e "  SSH Only: ${GREEN}SIM${NC}"
+    echo -e "  SSH Backend: ${YELLOW}${SSH_PORT}${NC}"
     echo -e "  Status: ${YELLOW}${STATUS}${NC}"
+    echo -e "  Protocolos: ${GREEN}xHTTP + SSL Tunnel + HTTP${NC}"
     echo ""
 
-    # Criar serviço xHTTP
-    create_xhttp_service "$PORT" "$STATUS"
+    create_xhttp_service "443" "$STATUS" "$SSH_PORT"
 
-    echo -e "${GREEN}Iniciando xHTTP SplitHTTP na porta ${PORT}...${NC}"
+    echo -e "${GREEN}Iniciando xHTTP_SSH / SSL TUNNEL na porta 443...${NC}"
     systemctl daemon-reload
     systemctl enable "proxy-443.service" 2>/dev/null
     systemctl start "proxy-443.service" 2>/dev/null
@@ -225,19 +252,28 @@ open_xhttp() {
 
     if systemctl is-active --quiet "proxy-443.service" 2>/dev/null; then
         echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
-        echo -e "${GREEN}║  xHTTP SplitHTTP ATIVO NA PORTA 443     ║${NC}"
+        echo -e "${GREEN}║  ATIVO NA PORTA 443                     ║${NC}"
+        echo -e "${GREEN}║  xHTTP_SSH + SSL TUNNEL                 ║${NC}"
         echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
         echo ""
-        echo -e "${YELLOW}Configuração SocksRevive-XHTTP-DEMO:${NC}"
-        echo -e "  Server: IP deste servidor"
-        echo -e "  Port: 443"
-        echo -e "  SNI: qualquer domínio (trust-all)"
-        echo -e "  XHTTP Path: /ssh"
-        echo -e "  XHTTP TLS: HABILITADO"
+        echo -e "${YELLOW}┌────────────────────────────────────────────┐${NC}"
+        echo -e "${YELLOW}│  SocksRevive (xHTTP SplitHTTP):          │${NC}"
+        echo -e "${YELLOW}│    Server: IP deste servidor             │${NC}"
+        echo -e "${YELLOW}│    Port: 443                             │${NC}"
+        echo -e "${YELLOW}│    SNI: qualquer domínio (trust-all)     │${NC}"
+        echo -e "${YELLOW}│    XHTTP Path: /ssh                      │${NC}"
+        echo -e "${YELLOW}│    XHTTP TLS: HABILITADO                 │${NC}"
+        echo -e "${YELLOW}├────────────────────────────────────────────┤${NC}"
+        echo -e "${YELLOW}│  HTTP Injector (SSL Tunnel):             │${NC}"
+        echo -e "${YELLOW}│    Server: IP deste servidor             │${NC}"
+        echo -e "${YELLOW}│    Port: 443                             │${NC}"
+        echo -e "${YELLOW}│    SSL Proxy: HABILITADO                 │${NC}"
+        echo -e "${YELLOW}│    Payload: default                      │${NC}"
+        echo -e "${YELLOW}└────────────────────────────────────────────┘${NC}"
         echo ""
         echo -e "${YELLOW}Logs: journalctl -u proxy-443.service -f${NC}"
     else
-        echo -e "${RED}Falha ao iniciar xHTTP na porta 443!${NC}"
+        echo -e "${RED}Falha ao iniciar na porta 443!${NC}"
         echo -e "${YELLOW}Logs: journalctl -u proxy-443.service -f${NC}"
     fi
 
@@ -288,18 +324,19 @@ EOF
 }
 
 # ============================================
-# Criar serviço xHTTP (SplitHTTP) exclusivo
+# Criar serviço xHTTP + SSL Tunnel (porta 443)
 # ============================================
 create_xhttp_service() {
     local PORT=$1
     local STATUS=$2
-    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-443.service"
+    local SSH_PORT=$3
+    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
 
-    EXTRA_ARGS="-p 443 -s ${STATUS}"
+    EXTRA_ARGS="-p ${PORT} -s ${STATUS} --ssh-port ${SSH_PORT}"
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=SDProxy xHTTP SplitHTTP - Porta 443
+Description=SDProxy xHTTP + SSL Tunnel - Porta ${PORT}
 After=network.target
 
 [Service]
@@ -322,9 +359,9 @@ close_port() {
     clear
     show_banner
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║         Fechar Porta              ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║           Fechar Porta                   ║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
     show_active_ports
@@ -357,9 +394,9 @@ restart_port() {
     clear
     show_banner
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║        Reiniciar Porta            ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════╝${NC}"
+    echo -e "${CYAN}╔══════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║          Reiniciar Porta                 ║${NC}"
+    echo -e "${CYAN}╚══════════════════════════════════════════╝${NC}"
     echo ""
 
     show_active_ports
@@ -395,7 +432,6 @@ restart_port() {
 
 while true; do
     show_menu
-    show_active_ports
     read OPTION
     case $OPTION in
         01|1) open_port ;;
