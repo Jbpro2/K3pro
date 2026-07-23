@@ -1,0 +1,25 @@
+XHTTP Protocol Details (SocksRevive-XHTTP):
+
+1. Session Creation (Downlink):
+   GET {basePath}/{sessionId}
+   - sessionId: random hex string
+   - Server streams SSH data back in the response body continuously.
+
+2. Uplink:
+   POST {basePath}/{sessionId}/{sequence}
+   - sequence: starts at 0, increments per POST.
+   - Only one POST in flight at a time.
+   - Content-Type: application/octet-stream
+   - Max 900 KiB per POST.
+
+3. Server Requirements:
+   - Map GET/POST by sessionId.
+   - Stream server-to-client bytes in GET response body.
+   - Accept sequence-numbered POST bodies and forward to SSH.
+   - Trust-all TLS (Server certificate doesn't need to be valid).
+
+Current BDRProxy Implementation Issues:
+- The path parsing might be too strict or incorrect.
+- The `is_xhttp_path` check might not be matching the `{basePath}/{sessionId}` structure correctly if basePath is empty or contains multiple slashes.
+- The sequence number in POST is being parsed but we need to ensure it doesn't break if it's missing or formatted differently.
+- Need to ensure GET response headers are exactly what the client expects.

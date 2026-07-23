@@ -74,14 +74,17 @@ async fn handle_client(
 
     let first_byte = peek_buf[0];
 
+    // TLS Handshake detectado
     if first_byte == 0x16 {
         return handle_tls_connection(stream, status, ssh_port).await;
     }
 
+    // HTTP direto detectado (G, P, H, C...)
     if first_byte == 0x47 || first_byte == 0x50 || first_byte == 0x48 || first_byte == 0x43 {
         return handle_http_raw(stream, status, ssh_port).await;
     }
 
+    // Outros dados (SSH direto, etc)
     handle_raw_tunnel(stream, ssh_port).await
 }
 
@@ -120,20 +123,21 @@ async fn handle_tls_connection(
     let mut end_of_headers = false;
     let mut total_read = 0usize;
 
+    // Ler headers HTTP após TLS
     while !end_of_headers && total_read < 65536 {
         match timeout(Duration::from_secs(15), tls_read.read(&mut chunk)).await {
             Ok(Ok(n)) if n > 0 => {
                 total_read += n;
                 http_buf.extend_from_slice(&chunk[..n]);
 
-                let pos = http_buf.windows(4).position(|w| w == b"\r\n\r\n");
-                if let Some(p) = pos {
+                if let Some(p) = http_buf.windows(4).position(|w| w == b"\r\n\r\n") {
                     end_of_headers = true;
                     let header_str = String::from_utf8_lossy(&http_buf[..p]);
                     let content_length = extract_content_length(&header_str).unwrap_or(0);
                     let header_end = p + 4;
                     let body_already = total_read - header_end;
 
+                    // Se for POST com corpo, ler o corpo completo
                     if content_length > 0 && body_already < content_length {
                         let remaining = content_length - body_already;
                         let mut body_buf = vec![0u8; remaining];
@@ -168,6 +172,7 @@ async fn handle_tls_connection(
 
     let tls_combined = tls_read.unsplit(tls_write);
 
+    // Roteamento baseado no path
     if is_xhttp_path(&path) {
         match method.as_str() {
             "GET" => handle_xhttp_get(tls_combined, &path, status, ssh_port).await,
@@ -175,21 +180,28 @@ async fn handle_tls_connection(
             _ => Ok(()),
         }
     } else {
+        // Se não for xHTTP, trata como SSL Tunnel (Injector)
         handle_ssl_tunnel_after_tls(tls_combined, &http_str, status, ssh_port).await
     }
 }
 
+/// Verifica se o path pertence ao protocolo xHTTP
 fn is_xhttp_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
+    if p.is_empty() { return false; }
+    
+    // Suporta /ssh/{sid} ou apenas /{sid}
     if p.starts_with("ssh/") || p == "ssh" {
         return true;
     }
+    
+    // O SocksRevive gera IDs hexadecimais ou revive-*. 
+    // Vamos aceitar qualquer path que tenha uma estrutura de ID.
     let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() >= 1 && !parts[0].is_empty() {
-        if parts[0].starts_with("revive-") {
-            return true;
-        }
+    if !parts[0].is_empty() {
+        return true; 
     }
+    
     false
 }
 
@@ -202,11 +214,10 @@ async fn handle_ssl_tunnel_after_tls(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
-    // Primeiro envia 101 com o status correto
+    // Resposta compatível com Injector
     let resp101 = format!("HTTP/1.1 101 ({})\r\n\r\n", status);
     stream.write_all(resp101.as_bytes()).await?;
     
-    // Depois envia 200 com o status correto
     let resp200 = format!("HTTP/1.1 200 ({})\r\n\r\n", status);
     stream.write_all(resp200.as_bytes()).await?;
     stream.flush().await?;
@@ -217,15 +228,7 @@ async fn handle_ssl_tunnel_after_tls(
             let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
             Ok(())
         }
-        Err(_) => {
-            match TcpStream::connect("127.0.0.1:1194").await {
-                Ok(mut vpn_stream) => {
-                    let _ = copy_bidirectional(&mut stream, &mut vpn_stream).await;
-                    Ok(())
-                }
-                Err(_) => Ok(()),
-            }
-        }
+        Err(_) => Ok(()),
     }
 }
 
@@ -244,7 +247,7 @@ async fn handle_raw_tunnel_tls(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HTTP RAW — xHTTP ou SSL Tunnel via HTTP
+// HTTP RAW — xHTTP ou SSL Tunnel via HTTP (sem TLS)
 // ═══════════════════════════════════════════════════════════════
 async fn handle_http_raw(
     mut stream: TcpStream,
@@ -339,6 +342,8 @@ async fn handle_xhttp_get(
             .as_millis());
     }
 
+    println!("[SDProxy][xHTTP-GET] Nova sessao: {}", session_id);
+
     let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
         Ok(s) => s,
         Err(_) => {
@@ -360,6 +365,7 @@ async fn handle_xhttp_get(
         });
     }
 
+    // Response Headers compatíveis com SocksRevive
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
@@ -378,7 +384,7 @@ async fn handle_xhttp_get(
     let mut buffer = [0u8; 16384];
     loop {
         let mut read_guard = ssh_r.lock().await;
-        match timeout(Duration::from_secs(60), read_guard.read(&mut buffer)).await {
+        match timeout(Duration::from_secs(120), read_guard.read(&mut buffer)).await {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
                 if stream.write_all(&buffer[..n]).await.is_err() { break; }
@@ -388,6 +394,7 @@ async fn handle_xhttp_get(
         }
     }
 
+    println!("[SDProxy][xHTTP-GET] Sessao encerrada: {}", session_id);
     {
         let mut sessions = SESSIONS.lock().await;
         sessions.remove(&session_id);
@@ -404,7 +411,7 @@ async fn handle_xhttp_post(
     path: &str,
     status: &str,
 ) -> Result<(), Error> {
-    let (session_id, _sequence) = parse_post_path(path);
+    let (session_id, sequence) = parse_post_path(path);
     let content_length = extract_content_length(full_request).unwrap_or(0);
 
     if content_length == 0 {
@@ -423,10 +430,13 @@ async fn handle_xhttp_post(
         }
     }
 
+    println!("[SDProxy][xHTTP-POST] Session: {} Seq: {} Len: {}", session_id, sequence, total_read);
+
     let sessions = SESSIONS.lock().await;
     if let Some(session) = sessions.get(&session_id) {
         let mut write_guard = session.ssh_write.lock().await;
         let _ = write_guard.write_all(&body_buf[..total_read]).await;
+        let _ = write_guard.flush().await;
     }
 
     let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
@@ -441,7 +451,7 @@ async fn handle_xhttp_post_raw(
     path: &str,
     status: &str,
 ) -> Result<(), Error> {
-    let (session_id, _sequence) = parse_post_path(path);
+    let (session_id, sequence) = parse_post_path(path);
     let content_length = extract_content_length(full_request).unwrap_or(0);
 
     if content_length == 0 {
@@ -452,6 +462,8 @@ async fn handle_xhttp_post_raw(
 
     let header_end = full_request.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
     let body_in_request = full_request.len() - header_end;
+
+    println!("[SDProxy][xHTTP-POST-RAW] Session: {} Seq: {} Len: {}", session_id, sequence, content_length);
 
     if body_in_request >= content_length {
         let body = &full_request.as_bytes()[header_end..header_end + content_length];
@@ -483,6 +495,7 @@ async fn send_to_ssh(session_id: String, data: &[u8]) {
     if let Some(session) = sessions.get(&session_id) {
         let mut write_guard = session.ssh_write.lock().await;
         let _ = write_guard.write_all(data).await;
+        let _ = write_guard.flush().await;
     }
 }
 
