@@ -29,7 +29,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.6.0 (DTunnel Fix)");
+    println!("[BDRProxy] xHTTP SplitHTTP v2.7.0 (DTunnel Handshake Fix)");
     println!("[xHTTP] Servico xHTTP SplitHTTP rodando na porta: {}", port);
     println!("[xHTTP] SSH backend: 127.0.0.1:{}", ssh_port);
     println!("[xHTTP] Status: {}", status);
@@ -598,6 +598,11 @@ async fn handle_xhttp_get_tls(
         }
     });
 
+    // Handshake compatível com DTunnel (101 seguido de 200)
+    let handshake_101 = format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\n");
+    let _ = tls_stream.write_all(handshake_101.as_bytes()).await;
+    let _ = tls_stream.flush().await;
+
     // Response streaming
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -682,6 +687,11 @@ async fn handle_xhttp_get_raw(
             }
         }
     });
+
+    // Handshake compatível com DTunnel
+    let handshake_101 = format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\n");
+    let _ = stream.write_all(handshake_101.as_bytes()).await;
+    let _ = stream.flush().await;
 
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
