@@ -1,5 +1,5 @@
 #!/bin/bash
-# SDProxy Installer - Version v2.3.8
+# SDProxy Installer - Version v2.6.0
 
 REPO_URL="https://github.com/PedroJbk/BDRProxy.git"
 REPO_BRANCH="main"
@@ -47,7 +47,7 @@ echo -e "${BLUE}${BOLD} ╚════██║██║  ██║██╔═
 echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
 echo -e "${BLUE}${BOLD} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
-log_info "Iniciando instalação do SDProxy v2.3.8..."
+log_info "Iniciando instalação do SDProxy v2.6.0 (DTunnel Fix)..."
 
 # --- Etapa 1 ---
 show_progress "Atualizando dependências..."
