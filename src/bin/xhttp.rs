@@ -180,7 +180,7 @@ async fn handle_h2_xhttp(
                         });
                     }
                     _ => {
-                        println!("[xHTTP h2] Método não suportado: {}", method);
+                        println!("[xHTTP h2] Metodo nao suportado: {}", method);
                         let resp: http::Response<()> = http::Response::builder()
                             .status(501)
                             .body(())
@@ -475,8 +475,13 @@ async fn handle_http1_tls(
     match method.as_str() {
         "GET" => handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
         "POST" => handle_xhttp_post_tls(&mut tls_stream, &read_buf, &path, status).await,
-        other => {
-            println!("[xHTTP h1] Método não suportado: {}", other);
+        _ => {
+            let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
+            tls_stream.write_all(resp.as_bytes()).await?;
+            let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+            let (mut r, mut w) = tokio::io::split(tls_stream);
+            let (mut sr, mut sw) = ssh_stream.into_split();
+            let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
             Ok(())
         }
     }
@@ -511,7 +516,15 @@ async fn handle_http_xhttp_raw(
     match method.as_str() {
         "GET" => handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
         "POST" => handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
-        _ => Ok(()),
+        _ => {
+            let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
+            stream.write_all(resp.as_bytes()).await?;
+            let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+            let (mut r, mut w) = stream.into_split();
+            let (mut sr, mut sw) = ssh_stream.into_split();
+            let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
+            Ok(())
+        }
     }
 }
 
