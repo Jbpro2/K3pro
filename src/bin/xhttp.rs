@@ -9,7 +9,6 @@ use tokio::time::{timeout, Duration};
 use tokio_rustls::rustls::{self, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 
-/// Sessão xHTTP ativa
 struct XhttpSession {
     ssh_write: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
     ssh_read: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
@@ -24,7 +23,7 @@ async fn main() -> Result<(), Error> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[SDProxy] xHTTP SplitHTTP + SSL TUNNEL (v2.3.3)");
+    println!("[SDProxy] xHTTP SplitHTTP + SSL TUNNEL (v2.3.4)");
     println!("[SDProxy] Porta: {} | SSH: {} | Status: {}", port, ssh_port, status);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
@@ -87,7 +86,6 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
     let mut chunk = vec![0u8; 4096];
     let mut end_of_headers = false;
 
-    // Ler headers
     while !end_of_headers && http_buf.len() < 65536 {
         match timeout(Duration::from_secs(10), tls_read.read(&mut chunk)).await {
             Ok(Ok(n)) if n > 0 => {
@@ -116,7 +114,6 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
 
     let tls_combined = tls_read.unsplit(tls_write);
 
-    // Lógica xHTTP: Se o path contém um ID (ex: hex de 8+ chars) ou path /ssh/
     if is_xhttp_path(&path) {
         match method.as_str() {
             "GET" => handle_xhttp_get(tls_combined, &path, status, ssh_port).await,
@@ -131,8 +128,8 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
 fn is_xhttp_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
     if p.is_empty() { return false; }
-    // Qualquer path com mais de 5 caracteres que não seja o padrão SSH do injector tratamos como xHTTP
-    if p.len() > 5 || p.starts_with("ssh") { return true; }
+    // xHTTP paths costumam ser longos (sessão) ou conter 'ssh'
+    if p.len() > 10 || p.contains("ssh") || p.contains("revive") { return true; }
     false
 }
 
@@ -140,7 +137,6 @@ async fn handle_ssl_tunnel_after_tls(mut stream: impl AsyncReadExt + AsyncWriteE
     let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
     stream.write_all(resp.as_bytes()).await?;
     stream.flush().await?;
-
     let mut ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
     let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
     Ok(())
@@ -162,7 +158,12 @@ async fn handle_http_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> 
     let http_str = String::from_utf8_lossy(&buf[..n]);
     let (method, path) = match parse_http_request(&http_str) {
         Some(m) => m,
-        None => return handle_raw_tunnel_with_data(buf[..n].to_vec(), stream, ssh_port).await,
+        None => {
+            let mut ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+            ssh_stream.write_all(&buf[..n]).await?;
+            let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
+            return Ok(());
+        }
     };
 
     if is_xhttp_path(&path) {
@@ -179,13 +180,6 @@ async fn handle_http_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> 
         let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
         Ok(())
     }
-}
-
-async fn handle_raw_tunnel_with_data(data: Vec<u8>, mut stream: TcpStream, ssh_port: u16) -> Result<(), Error> {
-    let mut ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
-    ssh_stream.write_all(&data).await?;
-    let _ = copy_bidirectional(&mut stream, &mut ssh_stream).await;
-    Ok(())
 }
 
 async fn handle_xhttp_get(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
@@ -230,12 +224,11 @@ async fn handle_xhttp_get(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
 async fn handle_xhttp_post(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin, full_request: &str, path: &str, _status: &str) -> Result<(), Error> {
     let session_id = extract_session_id(path);
     let content_length = extract_content_length(full_request).unwrap_or(0);
-    
     let header_end = full_request.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
     let mut body = full_request.as_bytes()[header_end..].to_vec();
     
     while body.len() < content_length {
-        let mut chunk = vec![0u8; content_length - body.len()];
+        let mut chunk = vec![0u8; 8192];
         let n = stream.read(&mut chunk).await?;
         if n == 0 { break; }
         body.extend_from_slice(&chunk[..n]);
@@ -243,7 +236,7 @@ async fn handle_xhttp_post(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin
 
     if let Some(session) = SESSIONS.lock().await.get(&session_id) {
         let mut write_guard = session.ssh_write.lock().await;
-        let _ = write_guard.write_all(&body).await;
+        let _ = write_guard.write_all(&body[..content_length.min(body.len())]).await;
         let _ = write_guard.flush().await;
     }
 
@@ -258,7 +251,7 @@ async fn handle_xhttp_post_raw(mut stream: impl AsyncReadExt + AsyncWriteExt + U
     let mut body = full_request.as_bytes()[header_end..].to_vec();
     
     while body.len() < content_length {
-        let mut chunk = vec![0u8; content_length - body.len()];
+        let mut chunk = vec![0u8; 8192];
         let n = stream.read(&mut chunk).await?;
         if n == 0 { break; }
         body.extend_from_slice(&chunk[..n]);
@@ -266,7 +259,7 @@ async fn handle_xhttp_post_raw(mut stream: impl AsyncReadExt + AsyncWriteExt + U
 
     if let Some(session) = SESSIONS.lock().await.get(&session_id) {
         let mut write_guard = session.ssh_write.lock().await;
-        let _ = write_guard.write_all(&body).await;
+        let _ = write_guard.write_all(&body[..content_length.min(body.len())]).await;
         let _ = write_guard.flush().await;
     }
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await?;
@@ -310,7 +303,6 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
         .with_no_client_auth()
         .with_single_cert(certs, keys.into_iter().next().unwrap())
         .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
-    
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
 }

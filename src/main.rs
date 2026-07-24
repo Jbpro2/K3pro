@@ -31,41 +31,38 @@ async fn main() -> Result<(), Error> {
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let status = get_status();
 
-    // 1. Enviar 101 IMEDIATAMENTE (Igual AWProxy)
-    let resp101 = format!("HTTP/1.1 101 {}\r\n\r\n", status);
-    client_stream.write_all(resp101.as_bytes()).await?;
-    client_stream.flush().await?;
-
-    // 2. Ler payload do cliente (Igual AWProxy)
-    let mut buffer = vec![0; 4096];
-    let n = match timeout(Duration::from_secs(2), client_stream.read(&mut buffer)).await {
+    // 1. PEEK para ver se é HTTP ou SSH direto
+    let mut peek_buf = [0u8; 1024];
+    let n_peek = match timeout(Duration::from_secs(2), client_stream.peek(&mut peek_buf)).await {
         Ok(Ok(n)) => n,
         _ => 0,
     };
 
-    // 3. Enviar 200 (Igual AWProxy)
-    let resp200 = format!("HTTP/1.1 200 {}\r\n\r\n", status);
-    client_stream.write_all(resp200.as_bytes()).await?;
-    client_stream.flush().await?;
+    let peek_str = String::from_utf8_lossy(&peek_buf[..n_peek]);
+    
+    // Se for HTTP (contém GET, POST, CONNECT ou HTTP/), faz o handshake
+    if peek_str.contains("GET") || peek_str.contains("POST") || peek_str.contains("CONNECT") || peek_str.contains("HTTP/") {
+        // Enviar 101
+        client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes()).await?;
+        client_stream.flush().await?;
 
-    // 4. Detectar backend
-    let payload_str = String::from_utf8_lossy(&buffer[..n]).to_lowercase();
-    let addr_proxy = if payload_str.contains("ssh") || n == 0 {
-        "127.0.0.1:22"
-    } else {
-        "127.0.0.1:1194"
-    };
+        // Ler payload
+        let mut buffer = vec![0; 4096];
+        let n = client_stream.read(&mut buffer).await?;
 
-    // 5. Conectar ao backend
+        // Enviar 200
+        client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes()).await?;
+        client_stream.flush().await?;
+    }
+
+    // 2. Conectar ao backend (Default SSH)
+    let addr_proxy = "127.0.0.1:22";
     let server_stream = match TcpStream::connect(addr_proxy).await {
         Ok(s) => s,
-        Err(_) => {
-            let alt = if addr_proxy == "127.0.0.1:22" { "127.0.0.1:1194" } else { "127.0.0.1:22" };
-            TcpStream::connect(alt).await?
-        }
+        Err(_) => TcpStream::connect("127.0.0.1:1194").await?
     };
 
-    // 6. Tunnel bidirecional usando a função transfer_data idêntica
+    // 3. Tunnel bidirecional
     let (client_read, client_write) = client_stream.into_split();
     let (server_read, server_write) = server_stream.into_split();
 
@@ -92,11 +89,7 @@ async fn transfer_data(
             let mut read_guard = read_stream.lock().await;
             read_guard.read(&mut buffer).await?
         };
-
-        if bytes_read == 0 {
-            break;
-        }
-
+        if bytes_read == 0 { break; }
         let mut write_guard = write_stream.lock().await;
         write_guard.write_all(&buffer[..bytes_read]).await?;
         write_guard.flush().await?;
@@ -109,9 +102,7 @@ fn get_port() -> u16 {
     let mut port = 8080;
     for i in 1..args.len() {
         if args[i] == "--port" || args[i] == "-p" {
-            if i + 1 < args.len() {
-                port = args[i + 1].parse().unwrap_or(8080);
-            }
+            if i + 1 < args.len() { port = args[i + 1].parse().unwrap_or(8080); }
         }
     }
     port
@@ -122,9 +113,7 @@ fn get_status() -> String {
     let mut status = String::from("@SDProxy");
     for i in 1..args.len() {
         if args[i] == "--status" || args[i] == "-s" {
-            if i + 1 < args.len() {
-                status = args[i + 1].clone();
-            }
+            if i + 1 < args.len() { status = args[i + 1].clone(); }
         }
     }
     status
