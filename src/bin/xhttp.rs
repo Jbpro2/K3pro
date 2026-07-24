@@ -12,7 +12,9 @@ use tokio_rustls::TlsAcceptor;
 /// Sessão xHTTP ativa com canais para comunicação GET<->POST<->SSH
 struct XhttpSession {
     post_tx: mpsc::Sender<Vec<u8>>,
+    #[allow(dead_code)]
     get_tx: mpsc::Sender<Vec<u8>>,
+    #[allow(dead_code)]
     active: Arc<RwLock<bool>>,
 }
 
@@ -25,7 +27,7 @@ async fn main() -> Result<(), Error> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.4.1 (Sync SDProxy)");
+    println!("[BDRProxy] xHTTP SplitHTTP v2.5.0 (Sync SDProxy)");
     println!("[xHTTP] Porta: {} | SSH: {} | Status: {}", port, ssh_port, status);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
@@ -106,8 +108,9 @@ async fn handle_tls_xhttp(stream: TcpStream, status: &str, ssh_port: u16) -> Res
     }
 
     let header_end_pos = tls_read_buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0);
+    let header_part = &tls_read_buf[..header_end_pos + 4];
     let http_str: String = String::from_utf8_lossy(&tls_read_buf[..header_end_pos]).to_string();
-    let content_length = extract_content_length_from_bytes(&tls_read_buf[..header_end_pos + 4]).unwrap_or(0);
+    let content_length = extract_content_length_from_bytes(header_part).unwrap_or(0);
     let body_already = total_read - (header_end_pos + 4);
 
     if content_length > 0 && body_already < content_length {
@@ -134,7 +137,7 @@ async fn handle_tls_xhttp(stream: TcpStream, status: &str, ssh_port: u16) -> Res
         _ => {
             let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
             tls_stream.write_all(resp.as_bytes()).await?;
-            let mut ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+            let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
             let (mut r, mut w) = tokio::io::split(tls_stream);
             let (mut sr, mut sw) = ssh_stream.into_split();
             let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
@@ -172,7 +175,7 @@ async fn handle_http_xhttp_raw(mut stream: TcpStream, status: &str, ssh_port: u1
         _ => {
             let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
             stream.write_all(resp.as_bytes()).await?;
-            let mut ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+            let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
             let (mut r, mut w) = stream.into_split();
             let (mut sr, mut sw) = ssh_stream.into_split();
             let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
@@ -226,13 +229,12 @@ async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<T
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
+         Connection: keep-alive\r\n\
          Cache-Control: no-cache, no-store, must-revalidate\r\n\
          Pragma: no-cache\r\n\
          Expires: 0\r\n\
-         Connection: keep-alive\r\n\
-         X-Session-ID: {}\r\n\
          X-Status: {}\r\n\r\n",
-        session_id, status
+        status
     );
 
     tls_stream.write_all(response.as_bytes()).await?;
@@ -286,7 +288,7 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         }
     });
 
-    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\nX-Session-ID: {}\r\nX-Status: {}\r\n\r\n", session_id, status);
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\nX-Status: {}\r\n\r\n", status);
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
 
@@ -326,7 +328,8 @@ async fn handle_xhttp_post_tls(tls_stream: &mut tokio_rustls::server::TlsStream<
         body.truncate(content_length);
         let _ = session.post_tx.send(body).await;
     }
-    tls_stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
+    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nX-Status: {}\r\n\r\n", _status);
+    tls_stream.write_all(resp.as_bytes()).await?;
     tls_stream.flush().await?;
     Ok(())
 }
@@ -357,7 +360,8 @@ async fn handle_xhttp_post_raw(stream: &mut TcpStream, full_request: &[u8], path
         body.truncate(content_length);
         let _ = session.post_tx.send(body).await;
     }
-    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
+    let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nX-Status: {}\r\n\r\n", _status);
+    stream.write_all(resp.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
 }
@@ -383,7 +387,9 @@ fn extract_content_length_from_bytes(data: &[u8]) -> Option<usize> {
     let s = String::from_utf8_lossy(data);
     for line in s.lines() {
         let lower = line.to_lowercase();
-        if lower.starts_with("content-length:") { return line.split(':').nth(1)?.trim().parse().ok(); }
+        if lower.starts_with("content-length:") {
+            return line.split(':').nth(1)?.trim().parse().ok();
+        }
     }
     None
 }
@@ -414,7 +420,8 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
         .with_single_cert(certs, keys.into_iter().next().unwrap())
         .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
     
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    // Suporte a HTTP/1.1 e HTTP/2 (SplitHTTP pode usar ambos)
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     
     Ok(config)
 }
