@@ -3,15 +3,17 @@ use std::io::Error;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{timeout, Duration};
 
 use tokio_rustls::rustls::{self, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 
+/// Sessão xHTTP ativa com canais para comunicação GET<->POST<->SSH
 struct XhttpSession {
-    ssh_write: Arc<Mutex<tokio::net::tcp::OwnedWriteHalf>>,
-    ssh_read: Arc<Mutex<tokio::net::tcp::OwnedReadHalf>>,
+    post_tx: mpsc::Sender<Vec<u8>>,
+    get_tx: mpsc::Sender<Vec<u8>>,
+    active: Arc<RwLock<bool>>,
 }
 
 static SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, XhttpSession>>>> =
@@ -23,7 +25,7 @@ async fn main() -> Result<(), Error> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[SDProxy] xHTTP SplitHTTP + SSL TUNNEL (v2.3.4)");
+    println!("[SDProxy] xHTTP SplitHTTP + SSL TUNNEL (v2.3.5)");
     println!("[SDProxy] Porta: {} | SSH: {} | Status: {}", port, ssh_port, status);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
@@ -73,7 +75,7 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
     };
 
     let acceptor = TlsAcceptor::from(Arc::new(config));
-    let tls_stream = match acceptor.accept(stream).await {
+    let mut tls_stream = match acceptor.accept(stream).await {
         Ok(s) => s,
         Err(e) => {
             println!("[SDProxy][TLS] Handshake falhou: {}", e);
@@ -81,13 +83,12 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
         }
     };
 
-    let (mut tls_read, tls_write) = tokio::io::split(tls_stream);
     let mut http_buf = Vec::new();
     let mut chunk = vec![0u8; 4096];
     let mut end_of_headers = false;
 
     while !end_of_headers && http_buf.len() < 65536 {
-        match timeout(Duration::from_secs(10), tls_read.read(&mut chunk)).await {
+        match timeout(Duration::from_secs(10), tls_stream.read(&mut chunk)).await {
             Ok(Ok(n)) if n > 0 => {
                 http_buf.extend_from_slice(&chunk[..n]);
                 if http_buf.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -99,36 +100,29 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
     }
 
     if http_buf.is_empty() {
-        let tls_combined = tls_read.unsplit(tls_write);
-        return handle_raw_tunnel_tls(tls_combined, ssh_port).await;
+        return handle_raw_tunnel_tls(tls_stream, ssh_port).await;
     }
 
     let http_str = String::from_utf8_lossy(&http_buf);
     let (method, path) = match parse_http_request(&http_str) {
         Some(m) => m,
-        None => {
-            let tls_combined = tls_read.unsplit(tls_write);
-            return handle_raw_tunnel_tls(tls_combined, ssh_port).await;
-        }
+        None => return handle_raw_tunnel_tls(tls_stream, ssh_port).await,
     };
-
-    let tls_combined = tls_read.unsplit(tls_write);
 
     if is_xhttp_path(&path) {
         match method.as_str() {
-            "GET" => handle_xhttp_get(tls_combined, &path, status, ssh_port).await,
-            "POST" => handle_xhttp_post(tls_combined, &http_str, &path, status).await,
+            "GET" => handle_xhttp_get_tls(tls_stream, &path, status, ssh_port).await,
+            "POST" => handle_xhttp_post_tls(tls_stream, &http_buf, &path, status).await,
             _ => Ok(()),
         }
     } else {
-        handle_ssl_tunnel_after_tls(tls_combined, status, ssh_port).await
+        handle_ssl_tunnel_after_tls(tls_stream, status, ssh_port).await
     }
 }
 
 fn is_xhttp_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
     if p.is_empty() { return false; }
-    // xHTTP paths costumam ser longos (sessão) ou conter 'ssh'
     if p.len() > 10 || p.contains("ssh") || p.contains("revive") { return true; }
     false
 }
@@ -168,8 +162,8 @@ async fn handle_http_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> 
 
     if is_xhttp_path(&path) {
         match method.as_str() {
-            "GET" => handle_xhttp_get(stream, &path, status, ssh_port).await,
-            "POST" => handle_xhttp_post_raw(stream, &http_str, &path, status).await,
+            "GET" => handle_xhttp_get_raw(stream, &path, status, ssh_port).await,
+            "POST" => handle_xhttp_post_raw(stream, &buf[..n], &path, status).await,
             _ => Ok(()),
         }
     } else {
@@ -182,17 +176,42 @@ async fn handle_http_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> 
     }
 }
 
-async fn handle_xhttp_get(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
+async fn handle_xhttp_get_tls(mut tls_stream: impl AsyncReadExt + AsyncWriteExt + Unpin, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
     let session_id = extract_session_id(path);
     let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
-    let (ssh_r, ssh_w) = ssh_stream.into_split();
-    let ssh_r = Arc::new(Mutex::new(ssh_r));
-    let ssh_w = Arc::new(Mutex::new(ssh_w));
+    let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
+
+    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(256);
+    let active = Arc::new(RwLock::new(true));
 
     {
         let mut sessions = SESSIONS.lock().await;
-        sessions.insert(session_id.clone(), XhttpSession { ssh_write: ssh_w, ssh_read: ssh_r.clone() });
+        sessions.insert(session_id.clone(), XhttpSession { post_tx, get_tx: get_tx.clone(), active: active.clone() });
     }
+
+    // Task 1: POST -> SSH
+    tokio::spawn(async move {
+        while let Some(data) = post_rx.recv().await {
+            if ssh_write.write_all(&data).await.is_err() { break; }
+            let _ = ssh_write.flush().await;
+        }
+    });
+
+    // Task 2: SSH -> GET Channel
+    let get_tx_for_read = get_tx.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match timeout(Duration::from_secs(60), ssh_read.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    if get_tx_for_read.send(buf[..n].to_vec()).await.is_err() { break; }
+                }
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                _ => break,
+            }
+        }
+    });
 
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -203,52 +222,87 @@ async fn handle_xhttp_get(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
         session_id, status
     );
 
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
+    tls_stream.write_all(response.as_bytes()).await?;
+    tls_stream.flush().await?;
 
-    let mut buffer = [0u8; 16384];
-    loop {
-        let mut read_guard = ssh_r.lock().await;
-        match timeout(Duration::from_secs(120), read_guard.read(&mut buffer)).await {
-            Ok(Ok(n)) if n > 0 => {
-                if stream.write_all(&buffer[..n]).await.is_err() { break; }
-                let _ = stream.flush().await;
-            }
-            _ => break,
-        }
+    while let Some(data) = get_rx.recv().await {
+        if tls_stream.write_all(&data).await.is_err() { break; }
+        let _ = tls_stream.flush().await;
     }
     SESSIONS.lock().await.remove(&session_id);
     Ok(())
 }
 
-async fn handle_xhttp_post(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin, full_request: &str, path: &str, _status: &str) -> Result<(), Error> {
+async fn handle_xhttp_get_raw(mut stream: TcpStream, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
     let session_id = extract_session_id(path);
-    let content_length = extract_content_length(full_request).unwrap_or(0);
-    let header_end = full_request.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
-    let mut body = full_request.as_bytes()[header_end..].to_vec();
-    
-    while body.len() < content_length {
-        let mut chunk = vec![0u8; 8192];
-        let n = stream.read(&mut chunk).await?;
-        if n == 0 { break; }
-        body.extend_from_slice(&chunk[..n]);
+    let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+    let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
+    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(256);
+    let active = Arc::new(RwLock::new(true));
+
+    {
+        let mut sessions = SESSIONS.lock().await;
+        sessions.insert(session_id.clone(), XhttpSession { post_tx, get_tx: get_tx.clone(), active: active.clone() });
     }
 
-    if let Some(session) = SESSIONS.lock().await.get(&session_id) {
-        let mut write_guard = session.ssh_write.lock().await;
-        let _ = write_guard.write_all(&body[..content_length.min(body.len())]).await;
-        let _ = write_guard.flush().await;
-    }
+    tokio::spawn(async move {
+        while let Some(data) = post_rx.recv().await {
+            if ssh_write.write_all(&data).await.is_err() { break; }
+            let _ = ssh_write.flush().await;
+        }
+    });
 
-    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await?;
+    let get_tx_for_read = get_tx.clone();
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 16384];
+        loop {
+            match timeout(Duration::from_secs(60), ssh_read.read(&mut buf)).await {
+                Ok(Ok(n)) if n > 0 => {
+                    if get_tx_for_read.send(buf[..n].to_vec()).await.is_err() { break; }
+                }
+                _ => break,
+            }
+        }
+    });
+
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\nX-Session-ID: {}\r\nX-Status: {}\r\n\r\n", session_id, status);
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+
+    while let Some(data) = get_rx.recv().await {
+        if stream.write_all(&data).await.is_err() { break; }
+        let _ = stream.flush().await;
+    }
+    SESSIONS.lock().await.remove(&session_id);
     Ok(())
 }
 
-async fn handle_xhttp_post_raw(mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin, full_request: &str, path: &str, _status: &str) -> Result<(), Error> {
+async fn handle_xhttp_post_tls(mut tls_stream: impl AsyncReadExt + AsyncWriteExt + Unpin, full_request: &[u8], path: &str, _status: &str) -> Result<(), Error> {
     let session_id = extract_session_id(path);
-    let content_length = extract_content_length(full_request).unwrap_or(0);
-    let header_end = full_request.find("\r\n\r\n").map(|p| p + 4).unwrap_or(0);
-    let mut body = full_request.as_bytes()[header_end..].to_vec();
+    let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
+    let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
+    let mut body = full_request[header_end..].to_vec();
+    
+    while body.len() < content_length {
+        let mut chunk = vec![0u8; 8192];
+        let n = tls_stream.read(&mut chunk).await?;
+        if n == 0 { break; }
+        body.extend_from_slice(&chunk[..n]);
+    }
+
+    if let Some(session) = SESSIONS.lock().await.get(&session_id) {
+        let _ = session.post_tx.send(body[..content_length.min(body.len())].to_vec()).await;
+    }
+    tls_stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await?;
+    Ok(())
+}
+
+async fn handle_xhttp_post_raw(mut stream: TcpStream, full_request: &[u8], path: &str, _status: &str) -> Result<(), Error> {
+    let session_id = extract_session_id(path);
+    let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
+    let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
+    let mut body = full_request[header_end..].to_vec();
     
     while body.len() < content_length {
         let mut chunk = vec![0u8; 8192];
@@ -258,9 +312,7 @@ async fn handle_xhttp_post_raw(mut stream: impl AsyncReadExt + AsyncWriteExt + U
     }
 
     if let Some(session) = SESSIONS.lock().await.get(&session_id) {
-        let mut write_guard = session.ssh_write.lock().await;
-        let _ = write_guard.write_all(&body[..content_length.min(body.len())]).await;
-        let _ = write_guard.flush().await;
+        let _ = session.post_tx.send(body[..content_length.min(body.len())].to_vec()).await;
     }
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await?;
     Ok(())
@@ -269,13 +321,12 @@ async fn handle_xhttp_post_raw(mut stream: impl AsyncReadExt + AsyncWriteExt + U
 fn extract_session_id(path: &str) -> String {
     let p = path.trim_start_matches('/');
     let parts: Vec<&str> = p.split('/').collect();
-    if parts.is_empty() { return "default".to_string(); }
-    if parts[0] == "ssh" && parts.len() > 1 { return parts[1].to_string(); }
-    parts[0].to_string()
+    if parts.len() >= 2 { parts[1].to_string() } else if !parts.is_empty() { parts[0].to_string() } else { "default".to_string() }
 }
 
-fn extract_content_length(data: &str) -> Option<usize> {
-    for line in data.lines() {
+fn extract_content_length_from_bytes(data: &[u8]) -> Option<usize> {
+    let s = String::from_utf8_lossy(data);
+    for line in s.lines() {
         let lower = line.to_lowercase();
         if lower.starts_with("content-length:") { return line.split(':').nth(1)?.trim().parse().ok(); }
     }

@@ -10,19 +10,19 @@ use tokio::time::{timeout, Duration};
 async fn main() -> Result<(), Error> {
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
-    println!("[SDProxy] Iniciando na porta: {}", port);
+    println!("[SDProxy] Iniciando servico na porta: {}", port);
     
     loop {
         match listener.accept().await {
             Ok((client_stream, addr)) => {
                 tokio::spawn(async move {
                     if let Err(e) = handle_client(client_stream).await {
-                        println!("[SDProxy] Erro cliente {}: {}", addr, e);
+                        println!("[SDProxy] Erro ao processar cliente {}: {}", addr, e);
                     }
                 });
             }
             Err(e) => {
-                println!("[SDProxy] Erro aceitar conexao: {}", e);
+                println!("[SDProxy] Erro ao aceitar conexao: {}", e);
             }
         }
     }
@@ -40,29 +40,42 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
 
     let peek_str = String::from_utf8_lossy(&peek_buf[..n_peek]);
     
-    // Se for HTTP (contém GET, POST, CONNECT ou HTTP/), faz o handshake
+    // Lógica do AWProxy: Se for HTTP, faz o handshake 101 -> Read -> 200
     if peek_str.contains("GET") || peek_str.contains("POST") || peek_str.contains("CONNECT") || peek_str.contains("HTTP/") {
         // Enviar 101
         client_stream.write_all(format!("HTTP/1.1 101 {}\r\n\r\n", status).as_bytes()).await?;
         client_stream.flush().await?;
 
-        // Ler payload
+        // Ler payload do cliente (Injector envia o request HTTP aqui)
         let mut buffer = vec![0; 4096];
         let n = client_stream.read(&mut buffer).await?;
+        let payload_str = String::from_utf8_lossy(&buffer[..n]).to_lowercase();
 
         // Enviar 200
         client_stream.write_all(format!("HTTP/1.1 200 {}\r\n\r\n", status).as_bytes()).await?;
         client_stream.flush().await?;
+
+        // Conectar ao backend baseado no payload (Igual AWProxy)
+        let addr_proxy = if payload_str.contains("ssh") || n == 0 {
+            "127.0.0.1:22"
+        } else {
+            "127.0.0.1:1194"
+        };
+
+        return start_tunnel(client_stream, addr_proxy).await;
     }
 
-    // 2. Conectar ao backend (Default SSH)
-    let addr_proxy = "127.0.0.1:22";
-    let server_stream = match TcpStream::connect(addr_proxy).await {
-        Ok(s) => s,
-        Err(_) => TcpStream::connect("127.0.0.1:1194").await?
-    };
+    // Se não for HTTP, assume SSH direto
+    start_tunnel(client_stream, "127.0.0.1:22").await
+}
 
-    // 3. Tunnel bidirecional
+async fn start_tunnel(client_stream: TcpStream, addr_proxy: &str) -> Result<(), Error> {
+    let server_connect = TcpStream::connect(addr_proxy).await;
+    if server_connect.is_err() {
+        return Ok(());
+    }
+    let server_stream = server_connect?;
+
     let (client_read, client_write) = client_stream.into_split();
     let (server_read, server_write) = server_stream.into_split();
 
@@ -71,11 +84,10 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let server_read = Arc::new(Mutex::new(server_read));
     let server_write = Arc::new(Mutex::new(server_write));
 
-    let c_to_s = transfer_data(client_read, server_write);
-    let s_to_c = transfer_data(server_read, client_write);
+    let client_to_server = transfer_data(client_read, server_write);
+    let server_to_client = transfer_data(server_read, client_write);
 
-    let _ = tokio::try_join!(c_to_s, s_to_c);
-
+    let _ = tokio::try_join!(client_to_server, server_to_client);
     Ok(())
 }
 
