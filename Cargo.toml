@@ -1,6 +1,6 @@
 [package]
 name = "sdproxy"
-version = "2.4.1"
+version = "2.5.0"
 edition = "2021"
 
 [dependencies]
@@ -12,6 +12,9 @@ tokio-rustls = "0.24"
 rustls = "0.21"
 rustls-pemfile = "1.0"
 once_cell = "1.19"
+h2 = "0.4"
+http = "1"
+bytes = "1"
 
 [[bin]]
 name = "sdproxy"
