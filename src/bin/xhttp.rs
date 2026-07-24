@@ -23,13 +23,17 @@ type XhttpError = Box<dyn std::error::Error + Send + Sync>;
 static SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, XhttpSession>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+/// Mapa para vincular IPs às suas sessões ativas (ajuda em CDNs como Azion/Cloudflare)
+static IP_SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, String>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
 #[tokio::main]
 async fn main() -> Result<(), XhttpError> {
     let port = get_port();
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v3.0.0 (Universal Fallback)");
+    println!("[BDRProxy] xHTTP SplitHTTP v3.1.0 (IP Persistence & CDN Fix)");
     println!("[xHTTP] Servico xHTTP SplitHTTP rodando na porta: {}", port);
     println!("[xHTTP] SSH backend: 127.0.0.1:{}", ssh_port);
     println!("[xHTTP] Status: {}", status);
@@ -66,6 +70,7 @@ async fn handle_xhttp_client(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
+    let client_ip = stream.peer_addr().map(|a| a.ip().to_string()).unwrap_or_default();
     let mut peek_buf = [0u8; 3];
     let peek_result = timeout(Duration::from_secs(10), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
@@ -78,7 +83,7 @@ async fn handle_xhttp_client(
 
     if first_byte == 0x16 {
         println!("[xHTTP] TLS detectado, fazendo handshake...");
-        return handle_tls_xhttp(stream, status, ssh_port).await;
+        return handle_tls_xhttp(stream, status, ssh_port, client_ip).await;
     }
 
     if first_byte == 0x47 || first_byte == 0x50 || first_byte == 0x48 {
@@ -94,6 +99,7 @@ async fn handle_tls_xhttp(
     stream: TcpStream,
     status: &str,
     ssh_port: u16,
+    client_ip: String,
 ) -> Result<(), XhttpError> {
     let cert_path = "/opt/sdproxy/cert.pem";
     let key_path = "/opt/sdproxy/key.pem";
@@ -123,7 +129,7 @@ async fn handle_tls_xhttp(
     match alpn {
         Some(b"h2") => {
             println!("[xHTTP] ALPN: h2 (HTTP/2)");
-            return handle_h2_xhttp(tls_stream, status, ssh_port).await;
+            return handle_h2_xhttp(tls_stream, status, ssh_port, client_ip).await;
         }
         Some(b"http/1.1") => {
             println!("[xHTTP] ALPN: http/1.1");
@@ -142,6 +148,7 @@ async fn handle_h2_xhttp(
     tls_stream: tokio_rustls::server::TlsStream<TcpStream>,
     status: &str,
     ssh_port: u16,
+    client_ip: String,
 ) -> Result<(), XhttpError> {
     println!("[xHTTP h2] Iniciando handshake HTTP/2...");
 
@@ -172,17 +179,20 @@ async fn handle_h2_xhttp(
 
                 println!("[xHTTP h2] Stream: {} {} session={}", method, path, session_id);
 
+                let client_ip_c = client_ip.clone();
                 match method.as_str() {
                     "GET" => {
+                        let client_ip_g = client_ip_c.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_h2_get(respond, request, &session_id, &status, ssh_port).await {
+                            if let Err(e) = handle_h2_get(respond, request, &session_id, &status, ssh_port, client_ip_g).await {
                                 println!("[xHTTP h2 GET] Erro: {}", e);
                             }
                         });
                     }
                     "POST" => {
+                        let client_ip_p = client_ip_c.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_h2_post(respond, request, &session_id, &status).await {
+                            if let Err(e) = handle_h2_post(respond, request, &session_id, &status, client_ip_p).await {
                                 println!("[xHTTP h2 POST] Erro: {}", e);
                             }
                         });
@@ -215,6 +225,7 @@ async fn handle_h2_get(
     session_id: &str,
     status: &str,
     ssh_port: u16,
+    client_ip: String,
 ) -> Result<(), XhttpError> {
     let sid = if session_id.is_empty() {
         generate_session_id()
@@ -235,7 +246,7 @@ async fn handle_h2_get(
     let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(256);
     let active = Arc::new(RwLock::new(true));
 
-    // Registrar sessão
+    // Registrar sessão e vincular ao IP
     {
         let mut sessions = SESSIONS.lock().await;
         sessions.insert(sid.clone(), XhttpSession {
@@ -243,7 +254,11 @@ async fn handle_h2_get(
             get_tx: get_tx.clone(),
             active: active.clone(),
         });
-        println!("[xHTTP h2 GET] Sessão {} registrada", sid);
+        if !client_ip.is_empty() {
+            let mut ip_map = IP_SESSIONS.lock().await;
+            ip_map.insert(client_ip.clone(), sid.clone());
+        }
+        println!("[xHTTP h2 GET] Sessão {} registrada para IP {}", sid, client_ip);
     }
 
     // Task: SSH write
@@ -353,6 +368,7 @@ async fn handle_h2_post(
     request: http::Request<h2::RecvStream>,
     session_id: &str,
     status: &str,
+    client_ip: String,
 ) -> Result<(), XhttpError> {
     println!("[xHTTP h2 POST] Session: {}", session_id);
 
@@ -397,9 +413,18 @@ async fn handle_h2_post(
     body.truncate(content_length);
     println!("[xHTTP h2 POST] {} bytes recebidos", body.len());
 
-    // Enviar para SSH via canal
+    // Tentar encontrar sessão pelo ID ou pelo IP
+    let mut sid = session_id.to_string();
+    if sid.is_empty() && !client_ip.is_empty() {
+        let ip_map = IP_SESSIONS.lock().await;
+        if let Some(linked_sid) = ip_map.get(&client_ip) {
+            sid = linked_sid.clone();
+            println!("[xHTTP h2 POST] Vinculado ao IP {} -> session {}", client_ip, sid);
+        }
+    }
+
     let sessions = SESSIONS.lock().await;
-    if let Some(session) = sessions.get(session_id) {
+    if let Some(session) = sessions.get(&sid) {
         if session.post_tx.send(body).await.is_err() {
             println!("[xHTTP h2 POST] Canal POST fechado para {}", session_id);
             let response: http::Response<()> = http::Response::builder()
