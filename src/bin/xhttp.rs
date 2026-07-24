@@ -29,7 +29,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.5.0");
+    println!("[BDRProxy] xHTTP SplitHTTP v2.6.0 (DTunnel Fix)");
     println!("[xHTTP] Servico xHTTP SplitHTTP rodando na porta: {}", port);
     println!("[xHTTP] SSH backend: 127.0.0.1:{}", ssh_port);
     println!("[xHTTP] Status: {}", status);
@@ -169,17 +169,15 @@ async fn handle_h2_xhttp(
 
                 println!("[xHTTP h2] Stream: {} {} session={}", method, path, session_id);
 
-                let is_xhttp = path.starts_with("/ssh") || path.contains("session");
-
                 match method.as_str() {
-                    "GET" if is_xhttp => {
+                    "GET" => {
                         tokio::spawn(async move {
                             if let Err(e) = handle_h2_get(respond, request, &session_id, &status, ssh_port).await {
                                 println!("[xHTTP h2 GET] Erro: {}", e);
                             }
                         });
                     }
-                    "POST" if is_xhttp => {
+                    "POST" => {
                         tokio::spawn(async move {
                             if let Err(e) = handle_h2_post(respond, request, &session_id, &status).await {
                                 println!("[xHTTP h2 POST] Erro: {}", e);
@@ -189,7 +187,7 @@ async fn handle_h2_xhttp(
                     _ => {
                         println!("[xHTTP h2] Metodo nao suportado: {}", method);
                         let resp: http::Response<()> = http::Response::builder()
-                            .status(501)
+                            .status(200)
                             .body(())
                             .unwrap();
                         let _ = respond.send_response(resp, true);
@@ -491,12 +489,10 @@ async fn handle_http1_tls(
 
     println!("[xHTTP h1] {} {}", method, path);
 
-    let is_xhttp = path.starts_with("/ssh") || path.contains("session");
-
     match method.as_str() {
-        "GET" if is_xhttp => handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
-        "POST" if is_xhttp => handle_xhttp_post_tls(&mut tls_stream, &read_buf, &path, status).await,
-        "CONNECT" | _ => {
+        "GET" => handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
+        "POST" => handle_xhttp_post_tls(&mut tls_stream, &read_buf, &path, status).await,
+        _ => {
             let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
             tls_stream.write_all(resp.as_bytes()).await?;
             let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
@@ -534,12 +530,10 @@ async fn handle_http_xhttp_raw(
 
     println!("[xHTTP RAW] {} {}", method, path);
 
-    let is_xhttp = path.starts_with("/ssh") || path.contains("session");
-
     match method.as_str() {
-        "GET" if is_xhttp => handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
-        "POST" if is_xhttp => handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
-        "CONNECT" | _ => {
+        "GET" => handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
+        "POST" => handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
+        _ => {
             let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
             stream.write_all(resp.as_bytes()).await?;
             let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
@@ -732,10 +726,8 @@ async fn handle_xhttp_post_tls(
     path: &str,
     status: &str,
 ) -> Result<(), XhttpError> {
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    let session_id = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
-
-    println!("[xHTTP POST TLS] Session: {}", session_id);
+    let session_id = extract_session_id(path);
+    println!("[xHTTP POST TLS] Session: {} (path: {})", session_id, path);
 
     let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
     if content_length == 0 {
@@ -789,10 +781,8 @@ async fn handle_xhttp_post_raw<S: AsyncReadExt + AsyncWriteExt + Unpin>(
     path: &str,
     status: &str,
 ) -> Result<(), XhttpError> {
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    let session_id = if parts.len() >= 2 { parts[1].to_string() } else { String::new() };
-
-    println!("[xHTTP POST RAW] Session: {}", session_id);
+    let session_id = extract_session_id(path);
+    println!("[xHTTP POST RAW] Session: {} (path: {})", session_id, path);
 
     let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
     if content_length == 0 {
@@ -852,18 +842,50 @@ fn parse_http_request(data: &str) -> Option<(String, String)> {
 }
 
 fn extract_session_id(path: &str) -> String {
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    if parts.len() >= 2 {
-        parts[1].to_string()
+    // Remove query string
+    let path_clean = path.split('?').next().unwrap_or(path);
+    let parts: Vec<&str> = path_clean.trim_start_matches('/').split('/').collect();
+    // Casos:
+    // /ssh/SESSION_ID        -> parts=["ssh", "SESSION_ID"]          -> SESSION_ID
+    // /ssh/SESSION_ID/0      -> parts=["ssh", "SESSION_ID", "0"]     -> SESSION_ID
+    // /SESSION_ID            -> parts=["SESSION_ID"]                 -> SESSION_ID
+    // /SESSION_ID/0          -> parts=["SESSION_ID", "0"]            -> SESSION_ID
+    // Heuristica: se parts[0] e um prefixo de rota curto (<=10 chars, nao hex longo), usar parts[1]
+    if parts.len() >= 2 && !parts[0].is_empty() {
+        let first = parts[0];
+        // Se o primeiro segmento parece ser um prefixo de rota (curto, como "ssh", "xhttp", "proxy")
+        // e nao parece ser um session ID (que geralmente e hex longo ou UUID)
+        let is_route_prefix = first.len() <= 10 && first.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let second = parts[1];
+        // O segundo segmento pode ser o session ID ou um numero de sequencia
+        // Se o segundo segmento e apenas digitos, e um numero de sequencia -> usar first
+        let second_is_seq = second.chars().all(|c| c.is_ascii_digit());
+        if is_route_prefix && !second_is_seq {
+            // Ex: /ssh/SESSION_ID ou /ssh/SESSION_ID/0 -> retorna SESSION_ID
+            second.to_string()
+        } else if !is_route_prefix {
+            // Ex: /SESSION_ID/0 -> first e o session ID
+            first.to_string()
+        } else {
+            // Fallback: retorna second
+            second.to_string()
+        }
+    } else if parts.len() == 1 && !parts[0].is_empty() {
+        parts[0].to_string()
     } else {
         String::new()
     }
 }
 
 fn extract_session_id_h2(path: &str) -> String {
-    // Tenta extrair do path /ssh/ID
-    if let Some(pos) = path.find("/ssh/") {
-        let sid = path[pos + 5..].split('?').next().unwrap_or("");
+    // Remove query string para analise do path
+    let path_no_query = path.split('?').next().unwrap_or(path);
+
+    // Tenta extrair do path /ssh/ID ou /ssh/ID/SEQ
+    if let Some(pos) = path_no_query.find("/ssh/") {
+        let after = &path_no_query[pos + 5..];
+        // Pegar apenas o primeiro segmento (session ID), ignorar sequence number
+        let sid = after.split('/').next().unwrap_or("");
         if !sid.is_empty() { return sid.to_string(); }
     }
     // Tenta extrair de query param ?session=ID ou ?id=ID
