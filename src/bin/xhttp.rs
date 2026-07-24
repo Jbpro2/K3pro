@@ -164,15 +164,17 @@ async fn handle_h2_xhttp(
 
                 println!("[xHTTP h2] Stream: {} {} session={}", method, path, session_id);
 
+                let is_xhttp = path.starts_with("/ssh") || path.contains("session");
+
                 match method.as_str() {
-                    "GET" => {
+                    "GET" if is_xhttp => {
                         tokio::spawn(async move {
                             if let Err(e) = handle_h2_get(respond, request, &session_id, &status, ssh_port).await {
                                 println!("[xHTTP h2 GET] Erro: {}", e);
                             }
                         });
                     }
-                    "POST" => {
+                    "POST" if is_xhttp => {
                         tokio::spawn(async move {
                             if let Err(e) = handle_h2_post(respond, request, &session_id, &status).await {
                                 println!("[xHTTP h2 POST] Erro: {}", e);
@@ -472,10 +474,12 @@ async fn handle_http1_tls(
 
     println!("[xHTTP h1] {} {}", method, path);
 
+    let is_xhttp = path.starts_with("/ssh") || path.contains("session");
+
     match method.as_str() {
-        "GET" => handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
-        "POST" => handle_xhttp_post_tls(&mut tls_stream, &read_buf, &path, status).await,
-        _ => {
+        "GET" if is_xhttp => handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
+        "POST" if is_xhttp => handle_xhttp_post_tls(&mut tls_stream, &read_buf, &path, status).await,
+        "CONNECT" | _ => {
             let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
             tls_stream.write_all(resp.as_bytes()).await?;
             let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
@@ -513,10 +517,12 @@ async fn handle_http_xhttp_raw(
 
     println!("[xHTTP RAW] {} {}", method, path);
 
+    let is_xhttp = path.starts_with("/ssh") || path.contains("session");
+
     match method.as_str() {
-        "GET" => handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
-        "POST" => handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
-        _ => {
+        "GET" if is_xhttp => handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
+        "POST" if is_xhttp => handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
+        "CONNECT" | _ => {
             let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
             stream.write_all(resp.as_bytes()).await?;
             let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
