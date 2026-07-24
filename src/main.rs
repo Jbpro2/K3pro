@@ -6,20 +6,12 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
-mod socks5;
-mod websocket;
-mod security;
-mod tcp_fallback;
-mod tls;
-mod ssh;
-mod protocol;
-
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     let port = get_port();
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     println!("[SDProxy] Iniciando na porta: {}", port);
-
+    
     loop {
         match listener.accept().await {
             Ok((client_stream, addr)) => {
@@ -39,31 +31,26 @@ async fn main() -> Result<(), Error> {
 async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let status = get_status();
 
-    // Lógica do AWProxy: Envia 101 -> Lê Payload -> Envia 200
-    // Isso é o que faz o Injector conectar em portas 80/8080
-    
-    // 1. Enviar 101
-    client_stream
-        .write_all(format!("HTTP/1.1 101 ({})\r\n\r\n", status).as_bytes())
-        .await?;
+    // 1. Enviar 101 IMEDIATAMENTE (Igual AWProxy)
+    let resp101 = format!("HTTP/1.1 101 {}\r\n\r\n", status);
+    client_stream.write_all(resp101.as_bytes()).await?;
     client_stream.flush().await?;
 
-    // 2. Ler payload (timeout curto para não travar se for SSH direto)
+    // 2. Ler payload do cliente (Igual AWProxy)
     let mut buffer = vec![0; 4096];
-    let n = match timeout(Duration::from_millis(500), client_stream.read(&mut buffer)).await {
+    let n = match timeout(Duration::from_secs(2), client_stream.read(&mut buffer)).await {
         Ok(Ok(n)) => n,
         _ => 0,
     };
 
-    // 3. Enviar 200
-    client_stream
-        .write_all(format!("HTTP/1.1 200 ({})\r\n\r\n", status).as_bytes())
-        .await?;
+    // 3. Enviar 200 (Igual AWProxy)
+    let resp200 = format!("HTTP/1.1 200 {}\r\n\r\n", status);
+    client_stream.write_all(resp200.as_bytes()).await?;
     client_stream.flush().await?;
 
-    // 4. Detectar backend (SSH vs VPN)
-    let payload_str = String::from_utf8_lossy(&buffer[..n]);
-    let addr_proxy = if payload_str.to_lowercase().contains("ssh") || n == 0 {
+    // 4. Detectar backend
+    let payload_str = String::from_utf8_lossy(&buffer[..n]).to_lowercase();
+    let addr_proxy = if payload_str.contains("ssh") || n == 0 {
         "127.0.0.1:22"
     } else {
         "127.0.0.1:1194"
@@ -73,28 +60,24 @@ async fn handle_client(mut client_stream: TcpStream) -> Result<(), Error> {
     let server_stream = match TcpStream::connect(addr_proxy).await {
         Ok(s) => s,
         Err(_) => {
-            // Tenta o outro se falhar
             let alt = if addr_proxy == "127.0.0.1:22" { "127.0.0.1:1194" } else { "127.0.0.1:22" };
             TcpStream::connect(alt).await?
         }
     };
 
-    // 6. Tunnel bidirecional
-    let (client_r, client_w) = client_stream.into_split();
-    let (server_r, server_w) = server_stream.into_split();
+    // 6. Tunnel bidirecional usando a função transfer_data idêntica
+    let (client_read, client_write) = client_stream.into_split();
+    let (server_read, server_write) = server_stream.into_split();
 
-    let client_r = Arc::new(Mutex::new(client_r));
-    let client_w = Arc::new(Mutex::new(client_w));
-    let server_r = Arc::new(Mutex::new(server_r));
-    let server_w = Arc::new(Mutex::new(server_w));
+    let client_read = Arc::new(Mutex::new(client_read));
+    let client_write = Arc::new(Mutex::new(client_write));
+    let server_read = Arc::new(Mutex::new(server_read));
+    let server_write = Arc::new(Mutex::new(server_write));
 
-    let c_to_s = transfer_data(client_r, server_w);
-    let s_to_c = transfer_data(server_r, client_w);
+    let c_to_s = transfer_data(client_read, server_write);
+    let s_to_c = transfer_data(server_read, client_write);
 
-    tokio::select! {
-        _ = c_to_s => {},
-        _ = s_to_c => {},
-    }
+    let _ = tokio::try_join!(c_to_s, s_to_c);
 
     Ok(())
 }
