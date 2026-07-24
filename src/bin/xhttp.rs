@@ -31,7 +31,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP v3.3.3 (Full Transparent Mode)");
+    println!("[BDRProxy] xHTTP v3.3.4 (XHTTP + SSL Payload Support)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
@@ -76,9 +76,9 @@ async fn handle_xhttp_client(
         return handle_tls_dual(stream, status, ssh_port, client_ip).await;
     }
 
-    // Detecta HTTP direto (não encriptado)
-    if first_byte == 0x47 || first_byte == 0x50 || first_byte == 0x48 {
-        return handle_http_xhttp_raw(stream, status, ssh_port).await;
+    // Detecta se parece ser HTTP (GET, POST, PUT, etc)
+    if first_byte >= 0x41 && first_byte <= 0x5A {
+        return handle_http_dual_raw(stream, status, ssh_port).await;
     }
 
     // Fallback para SSH direto (Proxy puro)
@@ -100,12 +100,12 @@ async fn handle_tls_dual(
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    // Sniffing após TLS: Verificamos se o cliente envia HTTP legítimo do XHTTP
+    // Sniffing após TLS: Verificamos se o cliente envia HTTP
     let mut buf = vec![0u8; 4096];
     let n = match timeout(Duration::from_secs(3), tls_stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => n,
         _ => {
-            // Se timeout ou erro, tentamos tratar como SSL Tunnel direto
+            // Se timeout, tratamos como SSL Tunnel Direto (sem payload)
             return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
         }
     };
@@ -113,10 +113,8 @@ async fn handle_tls_dual(
     let data = &buf[..n];
     let http_str = String::from_utf8_lossy(data);
     
-    // DETECÇÃO XHTTP: Só sequestramos se for GET ou POST e tiver o cabeçalho X-Session-ID ou o path XHTTP
-    // Se for PUT (log do usuário), CONNECT ou qualquer outro, mandamos direto pro SSH.
-    if (http_str.starts_with("GET ") || http_str.starts_with("POST ")) && 
-       (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
+    // 1. Verificamos se é XHTTP legítimo
+    if (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
         if let Some((method, path)) = parse_http_request(&http_str) {
             match method.as_str() {
                 "GET" => return handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
@@ -126,9 +124,45 @@ async fn handle_tls_dual(
         }
     }
 
-    // Se não for especificamente XHTTP, é um SSL Tunnel (SSH sobre TLS)
-    // Encaminhamos o que já lemos (data) para o SSH.
+    // 2. Se for qualquer outro HTTP (como o PUT do log), respondemos OK e viramos túnel
+    // Isso restaura a funcionalidade de Payload do Injector
+    if http_str.contains("HTTP/1.") {
+        let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
+        tls_stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+        return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
+    }
+
+    // 3. Fallback para dados desconhecidos
     handle_ssh_direct_tls(tls_stream, ssh_port, Some(data.to_vec())).await
+}
+
+async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
+    let mut buf = vec![0u8; 8192];
+    let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
+    let http_str = String::from_utf8_lossy(&buf[..n]);
+    
+    if (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
+        if let Some((method, path)) = parse_http_request(&http_str) {
+            match method.as_str() {
+                "GET" => return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
+                "POST" => return handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
+                _ => {}
+            }
+        }
+    }
+
+    // Resposta HTTP para túneis com payload em modo não-TLS
+    if http_str.contains("HTTP/1.") {
+        let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
+        stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    }
+    
+    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Nota: No modo Payload, os dados iniciais do HTTP não são enviados ao SSH após o OK
+    let (mut r, mut w) = stream.into_split();
+    let (mut sr, mut sw) = ssh.into_split();
+    let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
+    Ok(())
 }
 
 async fn handle_ssh_direct(mut stream: TcpStream, ssh_port: u16) -> Result<(), XhttpError> {
@@ -150,30 +184,7 @@ async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpSt
     Ok(())
 }
 
-async fn handle_http_xhttp_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
-    let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
-    let http_str = String::from_utf8_lossy(&buf[..n]);
-    
-    // Mesma lógica de detecção rigorosa para o modo raw
-    if (http_str.starts_with("GET ") || http_str.starts_with("POST ")) && 
-       (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
-        if let Some((method, path)) = parse_http_request(&http_str) {
-            match method.as_str() {
-                "GET" => return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
-                "POST" => return handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
-                _ => {}
-            }
-        }
-    }
-    
-    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
-    ssh.write_all(&buf[..n]).await.map_err(|e| Box::new(e) as XhttpError)?;
-    let (mut r, mut w) = stream.into_split();
-    let (mut sr, mut sw) = ssh.into_split();
-    let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
-    Ok(())
-}
+// --- XHTTP Acceleration Logic ---
 
 async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let (sid, _) = extract_path_info(path);
