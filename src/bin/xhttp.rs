@@ -25,7 +25,7 @@ async fn main() -> Result<(), Error> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[SDProxy] xHTTP SplitHTTP + SSL TUNNEL (v2.3.6)");
+    println!("[SDProxy] xHTTP SplitHTTP + SSL TUNNEL (v2.3.7)");
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     let status_arc = Arc::new(status);
 
@@ -66,7 +66,7 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
 
     let config = match build_tls_config(cert_path, key_path) {
         Ok(c) => c,
-        Err(e) => return Ok(()),
+        Err(_) => return Ok(()),
     };
 
     let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -125,7 +125,7 @@ async fn handle_tls_connection(stream: TcpStream, status: &str, ssh_port: u16) -
 
 fn is_xhttp_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
-    !p.is_empty() && (p.len() > 10 || p.contains("ssh") || p.contains("revive"))
+    !p.is_empty() && (p.len() > 10 || p.contains("ssh") || p.contains("revive") || p.contains("session"))
 }
 
 async fn handle_http_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), Error> {
@@ -166,8 +166,8 @@ async fn handle_xhttp_get_tls(mut tls_stream: impl AsyncReadExt + AsyncWriteExt 
     let session_id = extract_session_id(path);
     let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
     let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
-    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(256);
-    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(1024);
     let active = Arc::new(RwLock::new(true));
 
     {
@@ -193,7 +193,7 @@ async fn handle_xhttp_get_tls(mut tls_stream: impl AsyncReadExt + AsyncWriteExt 
         }
     });
 
-    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\nX-Session-ID: {}\r\nX-Status: {}\r\n\r\n", session_id, status);
+    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\nKeep-Alive: timeout=60\r\nX-Session-ID: {}\r\nX-Status: {}\r\n\r\n", session_id, status);
     tls_stream.write_all(response.as_bytes()).await?;
     tls_stream.flush().await?;
 
@@ -209,8 +209,8 @@ async fn handle_xhttp_get_raw(mut stream: TcpStream, path: &str, status: &str, s
     let session_id = extract_session_id(path);
     let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
     let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
-    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(256);
-    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(256);
+    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(1024);
     let active = Arc::new(RwLock::new(true));
 
     {
@@ -262,7 +262,7 @@ async fn handle_xhttp_post_tls(mut tls_stream: impl AsyncReadExt + AsyncWriteExt
     if let Some(session) = SESSIONS.lock().await.get(&session_id) {
         let _ = session.post_tx.send(body[..content_length.min(body.len())].to_vec()).await;
     }
-    tls_stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await?;
+    tls_stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
     Ok(())
 }
 
@@ -280,14 +280,21 @@ async fn handle_xhttp_post_raw(mut stream: TcpStream, full_request: &[u8], path:
     if let Some(session) = SESSIONS.lock().await.get(&session_id) {
         let _ = session.post_tx.send(body[..content_length.min(body.len())].to_vec()).await;
     }
-    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await?;
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
     Ok(())
 }
 
 fn extract_session_id(path: &str) -> String {
     let p = path.trim_start_matches('/');
     let parts: Vec<&str> = p.split('/').collect();
-    if parts.len() >= 2 { parts[1].to_string() } else if !parts.is_empty() { parts[0].to_string() } else { "default".to_string() }
+    // Tenta pegar o ID de várias formas: /ssh/ID, /session/ID ou apenas /ID
+    if parts.len() >= 2 && (parts[0] == "ssh" || parts[0] == "session" || parts[0] == "revive") {
+        parts[1].to_string()
+    } else if !parts.is_empty() {
+        parts[0].to_string()
+    } else {
+        "default".to_string()
+    }
 }
 
 fn extract_content_length_from_bytes(data: &[u8]) -> Option<usize> {
@@ -312,14 +319,18 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
     let mut key_reader = std::io::BufReader::new(key_file);
     let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?.into_iter().map(Certificate).collect();
     let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?.into_iter().map(PrivateKey).collect();
+    
+    // Suporte híbrido: TLS 1.2 e TLS 1.3
     let mut config = rustls::ServerConfig::builder()
         .with_cipher_suites(&rustls::ALL_CIPHER_SUITES)
         .with_kx_groups(&rustls::ALL_KX_GROUPS)
-        .with_protocol_versions(&[&rustls::version::TLS12])
+        .with_protocol_versions(&[&rustls::version::TLS12, &rustls::version::TLS13])
         .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?
         .with_no_client_auth()
         .with_single_cert(certs, keys.into_iter().next().unwrap())
         .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+    
+    // ALPN fixo em http/1.1 para evitar travamentos h2
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
 }
