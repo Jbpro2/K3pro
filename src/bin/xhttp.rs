@@ -29,7 +29,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.9.0 (Ultra Debug & Socket Fix)");
+    println!("[BDRProxy] xHTTP SplitHTTP v3.0.0 (Universal Fallback)");
     println!("[xHTTP] Servico xHTTP SplitHTTP rodando na porta: {}", port);
     println!("[xHTTP] SSH backend: 127.0.0.1:{}", ssh_port);
     println!("[xHTTP] Status: {}", status);
@@ -771,9 +771,13 @@ async fn handle_xhttp_post_tls(
             println!("[xHTTP POST TLS] Canal POST fechado");
         }
     } else {
-        println!("[xHTTP POST TLS] Sessão {} não encontrada!", session_id);
-        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        println!("[xHTTP POST TLS] Sessão {} não encontrada! Fallback para Túnel Direto...", session_id);
+        let resp = format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\nHTTP/1.1 200 OK\r\nConnection: keep-alive\r\nX-Status: {}\r\n\r\n", status);
         tls_stream.write_all(resp.as_bytes()).await?;
+        let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", 22)).await?;
+        let (mut r, mut w) = tokio::io::split(tls_stream);
+        let (mut sr, mut sw) = ssh_stream.into_split();
+        let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
         return Ok(());
     }
 
@@ -826,9 +830,13 @@ async fn handle_xhttp_post_raw<S: AsyncReadExt + AsyncWriteExt + Unpin>(
             println!("[xHTTP POST RAW] Canal POST fechado");
         }
     } else {
-        println!("[xHTTP POST RAW] Sessão {} não encontrada!", session_id);
-        let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        println!("[xHTTP POST RAW] Sessão {} não encontrada! Fallback para Túnel Direto...", session_id);
+        let resp = format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\nHTTP/1.1 200 OK\r\nConnection: keep-alive\r\nX-Status: {}\r\n\r\n", status);
         stream.write_all(resp.as_bytes()).await?;
+        let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", 22)).await?;
+        let (mut r, mut w) = tokio::io::split(stream);
+        let (mut sr, mut sw) = ssh_stream.into_split();
+        let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
         return Ok(());
     }
 
