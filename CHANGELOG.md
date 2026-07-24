@@ -1,5 +1,15 @@
 # SDProxy - Changelog
 
+## v2.4.1 - xHTTP SplitHTTP (DTUNNEL Fix)
+
+### Novo
+- **Correção SplitHTTP** — suporte completo ao protocolo SplitHTTP usado no DTUNNEL
+- **Persistência HTTP/1.1** — headers `Connection: keep-alive` obrigatórios para manter o canal GET aberto
+- **ALPN http/1.1** — forçando ALPN http/1.1 no TLS para evitar falhas de handshake no DTUNNEL
+- **Path Parsing** — suporte a paths com sequence numbers (ex: `/ssh/session/0`)
+- **Headers de Streaming** — inclusão de headers `Cache-Control`, `Pragma` e `Expires` para evitar cache de proxy intermediário (CDN)
+
+
 ## v0.3.0 - Multi-Protocolo (TCP + UDP + QUIC)
 
 ### Novo

@@ -25,7 +25,7 @@ async fn main() -> Result<(), Error> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.4.0 (Sync SDProxy)");
+    println!("[BDRProxy] xHTTP SplitHTTP v2.4.1 (Sync SDProxy)");
     println!("[xHTTP] Porta: {} | SSH: {} | Status: {}", port, ssh_port, status);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
@@ -56,6 +56,7 @@ async fn handle_xhttp_client(stream: TcpStream, status: &str, ssh_port: u16) -> 
         _ => return Ok(()),
     };
 
+    if bytes_peeked == 0 { return Ok(()); }
     let first_byte = peek_buf[0];
 
     // Detecta TLS (0x16 = TLS ClientHello)
@@ -96,7 +97,7 @@ async fn handle_tls_xhttp(stream: TcpStream, status: &str, ssh_port: u16) -> Res
             Ok(Ok(n)) if n > 0 => {
                 total_read += n;
                 tls_read_buf.extend_from_slice(&chunk[..n]);
-                if let Some(_) = tls_read_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                if tls_read_buf.windows(4).any(|w| w == b"\r\n\r\n") {
                     end_of_headers = true;
                 }
             }
@@ -182,6 +183,8 @@ async fn handle_http_xhttp_raw(mut stream: TcpStream, status: &str, ssh_port: u1
 
 async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
     let session_id = extract_session_id(path);
+    if session_id.is_empty() { return Ok(()); }
+
     let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
         Ok(s) => s,
         Err(_) => return Ok(()),
@@ -247,6 +250,8 @@ async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<T
 
 async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
     let session_id = extract_session_id(path);
+    if session_id.is_empty() { return Ok(()); }
+
     let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
         Ok(s) => s,
         Err(_) => return Ok(()),
@@ -301,8 +306,7 @@ async fn handle_xhttp_post_tls(tls_stream: &mut tokio_rustls::server::TlsStream<
     let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let body_in_request = full_request.len() - header_end;
 
-    let sessions = SESSIONS.lock().await;
-    if let Some(session) = sessions.get(&session_id) {
+    if let Some(session) = SESSIONS.lock().await.get(&session_id) {
         let mut body = if body_in_request >= content_length {
             full_request[header_end..header_end + content_length].to_vec()
         } else {
@@ -333,8 +337,7 @@ async fn handle_xhttp_post_raw(stream: &mut TcpStream, full_request: &[u8], path
     let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let body_in_request = full_request.len() - header_end;
 
-    let sessions = SESSIONS.lock().await;
-    if let Some(session) = sessions.get(&session_id) {
+    if let Some(session) = SESSIONS.lock().await.get(&session_id) {
         let mut body = if body_in_request >= content_length {
             full_request[header_end..header_end + content_length].to_vec()
         } else {
@@ -367,7 +370,13 @@ fn parse_http_request(data: &str) -> Option<(String, String)> {
 
 fn extract_session_id(path: &str) -> String {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    if parts.len() >= 2 { parts[1].to_string() } else if !parts.is_empty() { parts[0].to_string() } else { String::new() }
+    if parts.len() >= 2 {
+        parts[1].to_string()
+    } else if parts.len() == 1 && !parts[0].is_empty() {
+        parts[0].to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn extract_content_length_from_bytes(data: &[u8]) -> Option<usize> {
@@ -384,34 +393,58 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
     let key_file = std::fs::File::open(key_path)?;
     let mut cert_reader = std::io::BufReader::new(cert_file);
     let mut key_reader = std::io::BufReader::new(key_file);
-    let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?.into_iter().map(Certificate).collect();
-    let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?.into_iter().map(PrivateKey).collect();
+
+    let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?
+        .into_iter()
+        .map(Certificate)
+        .collect();
+
+    let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?
+        .into_iter()
+        .map(PrivateKey)
+        .collect();
+
+    if certs.is_empty() || keys.is_empty() {
+        return Err(Error::new(std::io::ErrorKind::Other, "Certs ou keys vazios"));
+    }
+
     let mut config = rustls::ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(certs, keys.into_iter().next().unwrap())
         .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+    
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    
     Ok(config)
 }
 
 fn get_port() -> u16 {
     let args: Vec<String> = std::env::args().collect();
-    let mut port = 443;
-    for i in 1..args.len() { if args[i] == "--port" || args[i] == "-p" { if i + 1 < args.len() { port = args[i + 1].parse().unwrap_or(443); } } }
-    port
-}
-
-fn get_status() -> String {
-    let args: Vec<String> = std::env::args().collect();
-    let mut status = String::from("@SDProxy");
-    for i in 1..args.len() { if args[i] == "--status" || args[i] == "-s" { if i + 1 < args.len() { status = args[i + 1].clone(); } } }
-    status
+    for i in 1..args.len() {
+        if (args[i] == "--port" || args[i] == "-p") && i + 1 < args.len() {
+            return args[i + 1].parse().unwrap_or(443);
+        }
+    }
+    443
 }
 
 fn get_ssh_port() -> u16 {
     let args: Vec<String> = std::env::args().collect();
-    let mut port = 22;
-    for i in 1..args.len() { if args[i] == "--ssh-port" { if i + 1 < args.len() { port = args[i + 1].parse().unwrap_or(22); } } }
-    port
+    for i in 1..args.len() {
+        if args[i] == "--ssh-port" && i + 1 < args.len() {
+            return args[i + 1].parse().unwrap_or(22);
+        }
+    }
+    22
+}
+
+fn get_status() -> String {
+    let args: Vec<String> = std::env::args().collect();
+    for i in 1..args.len() {
+        if (args[i] == "--status" || args[i] == "-s") && i + 1 < args.len() {
+            return args[i + 1].clone();
+        }
+    }
+    "@SDProxy".to_string()
 }
