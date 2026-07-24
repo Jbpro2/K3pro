@@ -5,7 +5,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::{timeout, Duration};
-
 use tokio_rustls::rustls::{self, Certificate, PrivateKey};
 use tokio_rustls::TlsAcceptor;
 
@@ -25,7 +24,7 @@ async fn main() -> Result<(), Error> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.4.2 (DTUNNEL Fix)");
+    println!("[BDRProxy] xHTTP SplitHTTP v3.3.0 (DTUNNEL Fix)");
     println!("[xHTTP] Porta: {} | SSH: {} | Status: {}", port, ssh_port, status);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
@@ -78,7 +77,10 @@ async fn handle_tls_xhttp(stream: TcpStream, status: &str, ssh_port: u16) -> Res
 
     let config = match build_tls_config(cert_path, key_path) {
         Ok(c) => c,
-        Err(_) => return Ok(()),
+        Err(e) => {
+            println!("[xHTTP] Erro TLS config: {}", e);
+            return Ok(());
+        }
     };
 
     let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -183,7 +185,7 @@ async fn handle_http_xhttp_raw(mut stream: TcpStream, status: &str, ssh_port: u1
 }
 
 async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
-    let session_id = extract_session_id(path);
+    let (session_id, _) = extract_path_info(path);
     if session_id.is_empty() { return Ok(()); }
 
     let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
@@ -216,7 +218,7 @@ async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<T
         let mut buf = vec![0u8; 16384];
         loop {
             if !*active_read.read().await { break; }
-            match timeout(Duration::from_secs(60), ssh_read.read(&mut buf)).await {
+            match timeout(Duration::from_secs(600), ssh_read.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => { if get_tx_for_read.send(buf[..n].to_vec()).await.is_err() { break; } }
                 _ => {}
@@ -224,7 +226,6 @@ async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<T
         }
     });
 
-    // Headers específicos para SplitHTTP mantendo canal aberto
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
@@ -243,7 +244,6 @@ async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<T
     tls_stream.flush().await?;
 
     while let Some(data) = get_rx.recv().await {
-        // Enviar no formato chunked: {size_hex}\r\n{data}\r\n
         let chunk_header = format!("{:x}\r\n", data.len());
         if tls_stream.write_all(chunk_header.as_bytes()).await.is_err() { break; }
         if tls_stream.write_all(&data).await.is_err() { break; }
@@ -257,7 +257,7 @@ async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<T
 }
 
 async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
-    let session_id = extract_session_id(path);
+    let (session_id, _) = extract_path_info(path);
     if session_id.is_empty() { return Ok(()); }
 
     let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
@@ -286,7 +286,7 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     tokio::spawn(async move {
         let mut buf = vec![0u8; 16384];
         loop {
-            match timeout(Duration::from_secs(60), ssh_read.read(&mut buf)).await {
+            match timeout(Duration::from_secs(600), ssh_read.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
                 Ok(Ok(n)) => { if get_tx_for_read.send(buf[..n].to_vec()).await.is_err() { break; } }
                 _ => {}
@@ -303,6 +303,7 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
          X-Status: {}\r\n\r\n", 
         session_id, status
     );
+
     stream.write_all(response.as_bytes()).await?;
     stream.flush().await?;
 
@@ -320,7 +321,7 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
 }
 
 async fn handle_xhttp_post_tls(tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>, full_request: &[u8], path: &str, _status: &str) -> Result<(), Error> {
-    let session_id = extract_session_id(path);
+    let (session_id, _) = extract_path_info(path);
     let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
     let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let body_in_request = full_request.len() - header_end;
@@ -345,14 +346,14 @@ async fn handle_xhttp_post_tls(tls_stream: &mut tokio_rustls::server::TlsStream<
         body.truncate(content_length);
         let _ = session.post_tx.send(body).await;
     }
-    // Resposta 200 limpa para POST
+
     tls_stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
     tls_stream.flush().await?;
     Ok(())
 }
 
 async fn handle_xhttp_post_raw(stream: &mut TcpStream, full_request: &[u8], path: &str, _status: &str) -> Result<(), Error> {
-    let session_id = extract_session_id(path);
+    let (session_id, _) = extract_path_info(path);
     let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
     let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let body_in_request = full_request.len() - header_end;
@@ -377,6 +378,7 @@ async fn handle_xhttp_post_raw(stream: &mut TcpStream, full_request: &[u8], path
         body.truncate(content_length);
         let _ = session.post_tx.send(body).await;
     }
+
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
     stream.flush().await?;
     Ok(())
@@ -388,15 +390,37 @@ fn parse_http_request(data: &str) -> Option<(String, String)> {
     if parts.len() >= 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
 }
 
-fn extract_session_id(path: &str) -> String {
-    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-    if parts.len() >= 2 {
-        parts[1].to_string()
-    } else if parts.len() == 1 && !parts[0].is_empty() {
-        parts[0].to_string()
-    } else {
-        String::new()
+/// Extrai ID da sessão e número de sequência do caminho da URL
+fn extract_path_info(path: &str) -> (String, Option<u64>) {
+    let path_clean = path.split('?').next().unwrap_or(path);
+    let parts: Vec<&str> = path_clean.trim_start_matches('/').split('/').collect();
+    
+    if parts.is_empty() || parts[0].is_empty() {
+        return (String::new(), None);
     }
+
+    // Suporte a múltiplos paths (/ssh/id, /xhttp/id, /id)
+    if parts.len() >= 2 {
+        let prefixes = ["ssh", "xhttp", "split", "v2"];
+        if prefixes.contains(&parts[0]) {
+            let sid = parts[1].to_string();
+            let seq = if parts.len() >= 3 { parts[2].parse::<u64>().ok() } else { None };
+            return (sid, seq);
+        }
+        
+        // Se não for prefixo, a primeira parte é o ID e a segunda é o seq
+        let sid = parts[0].to_string();
+        let seq = parts[1].parse::<u64>().ok();
+        return (sid, seq);
+    }
+
+    (parts[0].to_string(), None)
+}
+
+fn generate_session_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    format!("{:x}", start)
 }
 
 fn extract_content_length_from_bytes(data: &[u8]) -> Option<usize> {
@@ -433,9 +457,8 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
         .with_no_client_auth()
         .with_single_cert(certs, keys.into_iter().next().unwrap())
         .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
-    
+
     config.alpn_protocols = vec![b"http/1.1".to_vec(), b"h2".to_vec()];
-    
     Ok(config)
 }
 

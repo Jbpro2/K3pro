@@ -32,7 +32,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v3.2.0 (Full H2 Support)");
+    println!("[BDRProxy] xHTTP SplitHTTP v3.3.0 (DTUNNEL Fix & Seq Support)");
     println!("[xHTTP] Servico xHTTP SplitHTTP rodando na porta: {}", port);
     println!("[xHTTP] SSH backend: 127.0.0.1:{}", ssh_port);
     println!("[xHTTP] Status: {}", status);
@@ -161,7 +161,7 @@ async fn handle_h2_xhttp(
             Ok((request, mut respond)) => {
                 let method = request.method().clone();
                 let path = request.uri().path().to_string();
-                let session_id = extract_session_id_h2(&path);
+                let (session_id, _seq) = extract_path_info(&path);
                 let status = status.to_string();
 
                 println!("[xHTTP h2] Stream: {} {} session={}", method, path, session_id);
@@ -255,13 +255,14 @@ async fn handle_h2_get(
     tokio::spawn(async move {
         let mut buf = vec![0u8; 32768];
         loop {
-            match ssh_read.read(&mut buf).await {
-                Ok(0) => break,
-                Ok(n) => {
+            // Aumentado timeout para evitar desconexões em ociosidade
+            match timeout(Duration::from_secs(600), ssh_read.read(&mut buf)).await {
+                Ok(Ok(0)) => break,
+                Ok(Ok(n)) => {
                     let data = buf[..n].to_vec();
                     if get_tx_read.send(data).await.is_err() { break; }
                 }
-                Err(_) => break,
+                _ => break,
             }
         }
     });
@@ -290,13 +291,15 @@ async fn handle_h2_get(
     let _ = send_stream.send_data(bytes::Bytes::new(), false);
 
     loop {
-        match timeout(Duration::from_secs(30), get_rx.recv()).await {
+        // Aumentado timeout para evitar desconexões em ociosidade
+        match timeout(Duration::from_secs(600), get_rx.recv()).await {
             Ok(Some(data)) => {
                 let chunk = bytes::Bytes::from(data);
                 if send_stream.send_data(chunk, false).is_err() { break; }
             }
             Ok(None) => break,
             Err(_) => {
+                // Keep-alive: envia frame vazio se ocioso
                 if send_stream.send_data(bytes::Bytes::new(), false).is_err() { break; }
             }
         }
@@ -343,21 +346,21 @@ async fn handle_h2_post(
         let post_tx = session.post_tx.clone();
         drop(sessions);
 
-        tokio::spawn(async move {
-            let mut total_received = 0;
-            while let Some(chunk) = recv_stream.data().await {
-                match chunk {
-                    Ok(c) => {
-                        let len = c.len();
-                        total_received += len;
-                        let _ = post_tx.send(c.to_vec()).await;
-                        let _ = recv_stream.flow_control().release_capacity(len);
-                        if content_length > 0 && total_received >= content_length { break; }
-                    }
-                    Err(_) => break,
+        // FIX: No XHTTP, devemos ler o corpo COMPLETAMENTE antes de responder 200 OK
+        // Isso garante o backpressure correto para o cliente single-flight.
+        let mut total_received = 0;
+        while let Some(chunk) = recv_stream.data().await {
+            match chunk {
+                Ok(c) => {
+                    let len = c.len();
+                    total_received += len;
+                    let _ = post_tx.send(c.to_vec()).await;
+                    let _ = recv_stream.flow_control().release_capacity(len);
+                    if content_length > 0 && total_received >= content_length { break; }
                 }
+                Err(_) => break,
             }
-        });
+        }
     }
 
     let response: http::Response<()> = http::Response::builder()
@@ -433,11 +436,7 @@ async fn handle_http1_tls(
     }
 }
 
-async fn handle_http_xhttp_raw(
-    mut stream: TcpStream,
-    status: &str,
-    ssh_port: u16,
-) -> Result<(), XhttpError> {
+async fn handle_http_xhttp_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), Error> {
     let mut buf = vec![0u8; 65536];
     let n = match timeout(Duration::from_secs(10), stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => n,
@@ -450,7 +449,14 @@ async fn handle_http_xhttp_raw(
 
     let (method, path) = match parse_http_request(header_str) {
         Some(m) => m,
-        None => return Ok(()),
+        None => {
+            let mut ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+            ssh_stream.write_all(&buf[..n]).await?;
+            let (mut r, mut w) = stream.into_split();
+            let (mut sr, mut sw) = ssh_stream.into_split();
+            let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
+            return Ok(());
+        }
     };
 
     match method.as_str() {
@@ -459,7 +465,7 @@ async fn handle_http_xhttp_raw(
         _ => {
             let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
             stream.write_all(resp.as_bytes()).await?;
-            let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+            let mut ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
             let (mut r, mut w) = stream.into_split();
             let (mut sr, mut sw) = ssh_stream.into_split();
             let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
@@ -468,16 +474,15 @@ async fn handle_http_xhttp_raw(
     }
 }
 
-async fn handle_xhttp_get_tls(
-    tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
-    path: &str,
-    status: &str,
-    ssh_port: u16,
-) -> Result<(), XhttpError> {
-    let mut session_id = extract_session_id(path);
-    if session_id.is_empty() { session_id = generate_session_id(); }
+async fn handle_xhttp_get_tls(tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
+    let (session_id, _) = extract_path_info(path);
+    if session_id.is_empty() { return Ok(()); }
 
-    let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+    let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+
     let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
     let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(1024);
     let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(1024);
@@ -492,46 +497,48 @@ async fn handle_xhttp_get_tls(
     tokio::spawn(async move {
         while let Some(data) = post_rx.recv().await {
             if !*active_write.read().await { break; }
-            let _ = ssh_write.write_all(&data).await;
+            if ssh_write.write_all(&data).await.is_err() { break; }
+            let _ = ssh_write.flush().await;
         }
     });
 
-    let get_tx_read = get_tx.clone();
+    let active_read = active.clone();
+    let get_tx_for_read = get_tx.clone();
     tokio::spawn(async move {
         let mut buf = vec![0u8; 16384];
         loop {
-            match timeout(Duration::from_secs(60), ssh_read.read(&mut buf)).await {
+            if !*active_read.read().await { break; }
+            match timeout(Duration::from_secs(600), ssh_read.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
-                Ok(Ok(n)) => { if get_tx_read.send(buf[..n].to_vec()).await.is_err() { break; } }
-                _ => break,
+                Ok(Ok(n)) => { if get_tx_for_read.send(buf[..n].to_vec()).await.is_err() { break; } }
+                _ => {}
             }
         }
     });
 
-    let h101 = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\n";
-    let _ = tls_stream.write_all(h101.as_bytes()).await;
-    let _ = tls_stream.flush().await;
-
-    let h200 = format!(
+    let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate\r\n\
+         Pragma: no-cache\r\n\
+         Expires: 0\r\n\
          Connection: keep-alive\r\n\
+         X-Accel-Buffering: no\r\n\
          X-Session-ID: {}\r\n\
          X-Status: {}\r\n\r\n",
         session_id, status
     );
-    let _ = tls_stream.write_all(h200.as_bytes()).await;
-    let _ = tls_stream.flush().await;
 
-    loop {
-        match timeout(Duration::from_secs(30), get_rx.recv()).await {
-            Ok(Some(data)) => {
-                if tls_stream.write_all(&data).await.is_err() { break; }
-                let _ = tls_stream.flush().await;
-            }
-            Ok(None) => break,
-            Err(_) => { let _ = tls_stream.flush().await; }
-        }
+    tls_stream.write_all(response.as_bytes()).await?;
+    tls_stream.flush().await?;
+
+    while let Some(data) = get_rx.recv().await {
+        let chunk_header = format!("{:x}\r\n", data.len());
+        if tls_stream.write_all(chunk_header.as_bytes()).await.is_err() { break; }
+        if tls_stream.write_all(&data).await.is_err() { break; }
+        if tls_stream.write_all(b"\r\n").await.is_err() { break; }
+        let _ = tls_stream.flush().await;
     }
 
     *active.write().await = false;
@@ -539,16 +546,15 @@ async fn handle_xhttp_get_tls(
     Ok(())
 }
 
-async fn handle_xhttp_get_raw(
-    mut stream: impl AsyncReadExt + AsyncWriteExt + Unpin,
-    path: &str,
-    status: &str,
-    ssh_port: u16,
-) -> Result<(), XhttpError> {
-    let mut session_id = extract_session_id(path);
-    if session_id.is_empty() { session_id = generate_session_id(); }
+async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, ssh_port: u16) -> Result<(), Error> {
+    let (session_id, _) = extract_path_info(path);
+    if session_id.is_empty() { return Ok(()); }
 
-    let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
+    let ssh_stream = match TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+
     let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
     let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(1024);
     let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(1024);
@@ -561,46 +567,42 @@ async fn handle_xhttp_get_raw(
 
     tokio::spawn(async move {
         while let Some(data) = post_rx.recv().await {
-            let _ = ssh_write.write_all(&data).await;
+            if ssh_write.write_all(&data).await.is_err() { break; }
+            let _ = ssh_write.flush().await;
         }
     });
 
-    let get_tx_read = get_tx.clone();
+    let get_tx_for_read = get_tx.clone();
     tokio::spawn(async move {
         let mut buf = vec![0u8; 16384];
         loop {
-            match timeout(Duration::from_secs(60), ssh_read.read(&mut buf)).await {
+            match timeout(Duration::from_secs(600), ssh_read.read(&mut buf)).await {
                 Ok(Ok(0)) => break,
-                Ok(Ok(n)) => { if get_tx_read.send(buf[..n].to_vec()).await.is_err() { break; } }
-                _ => break,
+                Ok(Ok(n)) => { if get_tx_for_read.send(buf[..n].to_vec()).await.is_err() { break; } }
+                _ => {}
             }
         }
     });
 
-    let full_handshake = format!(
-        "HTTP/1.1 101 Switching Protocols\r\n\
-         Connection: upgrade\r\n\
-         Upgrade: websocket\r\n\
-         Sec-WebSocket-Accept: DTUNNEL\r\n\r\n\
-         HTTP/1.1 200 OK\r\n\
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
+         Transfer-Encoding: chunked\r\n\
          Connection: keep-alive\r\n\
          X-Session-ID: {}\r\n\
-         X-Status: {}\r\n\r\n",
+         X-Status: {}\r\n\r\n", 
         session_id, status
     );
-    let _ = stream.write_all(full_handshake.as_bytes()).await;
-    let _ = stream.flush().await;
 
-    loop {
-        match timeout(Duration::from_secs(30), get_rx.recv()).await {
-            Ok(Some(data)) => {
-                if stream.write_all(&data).await.is_err() { break; }
-                let _ = stream.flush().await;
-            }
-            Ok(None) => break,
-            Err(_) => { let _ = stream.flush().await; }
-        }
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+
+    while let Some(data) = get_rx.recv().await {
+        let chunk_header = format!("{:x}\r\n", data.len());
+        if stream.write_all(chunk_header.as_bytes()).await.is_err() { break; }
+        if stream.write_all(&data).await.is_err() { break; }
+        if stream.write_all(b"\r\n").await.is_err() { break; }
+        let _ = stream.flush().await;
     }
 
     *active.write().await = false;
@@ -608,26 +610,14 @@ async fn handle_xhttp_get_raw(
     Ok(())
 }
 
-async fn handle_xhttp_post_tls(
-    tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>,
-    full_request: &[u8],
-    path: &str,
-    status: &str,
-) -> Result<(), XhttpError> {
-    let session_id = extract_session_id(path);
+async fn handle_xhttp_post_tls(tls_stream: &mut tokio_rustls::server::TlsStream<TcpStream>, full_request: &[u8], path: &str, _status: &str) -> Result<(), Error> {
+    let (session_id, _seq) = extract_path_info(path);
     let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
-    if content_length == 0 {
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Status: {}\r\n\r\n", status);
-        tls_stream.write_all(resp.as_bytes()).await?;
-        return Ok(());
-    }
-
     let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let body_in_request = full_request.len() - header_end;
 
-    let sessions = SESSIONS.lock().await;
-    if let Some(session) = sessions.get(&session_id) {
-        let body = if body_in_request >= content_length {
+    if let Some(session) = SESSIONS.lock().await.get(&session_id) {
+        let mut body = if body_in_request >= content_length {
             full_request[header_end..header_end + content_length].to_vec()
         } else {
             let mut body = full_request[header_end..].to_vec();
@@ -641,37 +631,25 @@ async fn handle_xhttp_post_tls(
                 }
             }
             body.extend_from_slice(&buf[..read]);
-            body[..content_length].to_vec()
+            body
         };
+        body.truncate(content_length);
         let _ = session.post_tx.send(body).await;
     }
 
-    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
-    tls_stream.write_all(resp.as_bytes()).await?;
+    tls_stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
     tls_stream.flush().await?;
     Ok(())
 }
 
-async fn handle_xhttp_post_raw<S: AsyncReadExt + AsyncWriteExt + Unpin>(
-    stream: &mut S,
-    full_request: &[u8],
-    path: &str,
-    status: &str,
-) -> Result<(), XhttpError> {
-    let session_id = extract_session_id(path);
+async fn handle_xhttp_post_raw(stream: &mut TcpStream, full_request: &[u8], path: &str, _status: &str) -> Result<(), Error> {
+    let (session_id, _seq) = extract_path_info(path);
     let content_length = extract_content_length_from_bytes(full_request).unwrap_or(0);
-    if content_length == 0 {
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Status: {}\r\n\r\n", status);
-        stream.write_all(resp.as_bytes()).await?;
-        return Ok(());
-    }
-
     let header_end = full_request.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let body_in_request = full_request.len() - header_end;
 
-    let sessions = SESSIONS.lock().await;
-    if let Some(session) = sessions.get(&session_id) {
-        let body = if body_in_request >= content_length {
+    if let Some(session) = SESSIONS.lock().await.get(&session_id) {
+        let mut body = if body_in_request >= content_length {
             full_request[header_end..header_end + content_length].to_vec()
         } else {
             let mut body = full_request[header_end..].to_vec();
@@ -685,13 +663,13 @@ async fn handle_xhttp_post_raw<S: AsyncReadExt + AsyncWriteExt + Unpin>(
                 }
             }
             body.extend_from_slice(&buf[..read]);
-            body[..content_length].to_vec()
+            body
         };
+        body.truncate(content_length);
         let _ = session.post_tx.send(body).await;
     }
 
-    let resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
-    stream.write_all(resp.as_bytes()).await?;
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await?;
     stream.flush().await?;
     Ok(())
 }
@@ -702,16 +680,34 @@ fn parse_http_request(data: &str) -> Option<(String, String)> {
     if parts.len() >= 2 { Some((parts[0].to_string(), parts[1].to_string())) } else { None }
 }
 
-fn extract_session_id(path: &str) -> String {
+/// Extrai ID da sessão e número de sequência do caminho da URL
+fn extract_path_info(path: &str) -> (String, Option<u64>) {
     let path_clean = path.split('?').next().unwrap_or(path);
     let parts: Vec<&str> = path_clean.trim_start_matches('/').split('/').collect();
-    if parts.len() >= 2 && parts[0] == "ssh" { parts[1].to_string() }
-    else if !parts.is_empty() && !parts[0].is_empty() && parts[0] != "ssh" { parts[0].to_string() }
-    else { String::new() }
-}
+    
+    if parts.is_empty() || parts[0].is_empty() {
+        return (String::new(), None);
+    }
 
-fn extract_session_id_h2(path: &str) -> String {
-    extract_session_id(path)
+    // Caso 1: /basePath/sessionId/seq ou /basePath/sessionId
+    // Ex: /ssh/abc123/0 ou /xhttp/abc123
+    if parts.len() >= 2 {
+        // Se a primeira parte for um prefixo comum (ssh, xhttp, etc), a segunda é o ID
+        let prefixes = ["ssh", "xhttp", "split", "v2"];
+        if prefixes.contains(&parts[0]) {
+            let sid = parts[1].to_string();
+            let seq = if parts.len() >= 3 { parts[2].parse::<u64>().ok() } else { None };
+            return (sid, seq);
+        }
+        
+        // Se não for prefixo, a primeira parte é o ID e a segunda é o seq
+        let sid = parts[0].to_string();
+        let seq = parts[1].parse::<u64>().ok();
+        return (sid, seq);
+    }
+
+    // Caso 2: /sessionId
+    (parts[0].to_string(), None)
 }
 
 fn generate_session_id() -> String {
@@ -720,59 +716,71 @@ fn generate_session_id() -> String {
     format!("{:x}", start)
 }
 
-fn extract_content_length_from_bytes(headers: &[u8]) -> Option<usize> {
-    let s = String::from_utf8_lossy(headers).to_lowercase();
+fn extract_content_length_from_bytes(data: &[u8]) -> Option<usize> {
+    let s = String::from_utf8_lossy(data);
     for line in s.lines() {
-        if line.starts_with("content-length:") {
-            return line.split(':').nth(1)?.trim().parse().ok();
-        }
+        let lower = line.to_lowercase();
+        if lower.starts_with("content-length:") { return line.split(':').nth(1)?.trim().parse().ok(); }
     }
     None
 }
 
-fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerConfig, XhttpError> {
-    use std::fs::File;
-    use std::io::BufReader;
+fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerConfig, Error> {
+    let cert_file = std::fs::File::open(cert_path)?;
+    let key_file = std::fs::File::open(key_path)?;
+    let mut cert_reader = std::io::BufReader::new(cert_file);
+    let mut key_reader = std::io::BufReader::new(key_file);
 
-    let cert_file = File::open(cert_path)?;
-    let mut cert_reader = BufReader::new(cert_file);
-    let certs = rustls_pemfile::certs(&mut cert_reader)?
+    let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?
         .into_iter()
         .map(Certificate)
         .collect();
 
-    let key_file = File::open(key_path)?;
-    let mut key_reader = BufReader::new(key_file);
-    let keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?;
-    if keys.is_empty() { return Err("No private keys found".into()); }
-    let key = PrivateKey(keys[0].clone());
+    let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?
+        .into_iter()
+        .map(PrivateKey)
+        .collect();
 
-    let config = rustls::ServerConfig::builder()
+    if certs.is_empty() || keys.is_empty() {
+        return Err(Error::new(std::io::ErrorKind::Other, "Certs ou keys vazios"));
+    }
+
+    let mut config = rustls::ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
-        .with_single_cert(certs, key)?;
+        .with_single_cert(certs, keys.into_iter().next().unwrap())
+        .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+
+    config.alpn_protocols = vec![b"http/1.1".to_vec(), b"h2".to_vec()];
     Ok(config)
 }
 
 fn get_port() -> u16 {
-    std::env::args().enumerate()
-        .find(|(_, a)| a == "--port" || a == "-p")
-        .and_then(|(i, _)| std::env::args().nth(i + 1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(443)
+    let args: Vec<String> = std::env::args().collect();
+    for i in 1..args.len() {
+        if (args[i] == "--port" || args[i] == "-p") && i + 1 < args.len() {
+            return args[i + 1].parse().unwrap_or(443);
+        }
+    }
+    443
 }
 
 fn get_ssh_port() -> u16 {
-    std::env::args().enumerate()
-        .find(|(_, a)| a == "--ssh-port")
-        .and_then(|(i, _)| std::env::args().nth(i + 1))
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(22)
+    let args: Vec<String> = std::env::args().collect();
+    for i in 1..args.len() {
+        if args[i] == "--ssh-port" && i + 1 < args.len() {
+            return args[i + 1].parse().unwrap_or(22);
+        }
+    }
+    22
 }
 
 fn get_status() -> String {
-    std::env::args().enumerate()
-        .find(|(_, a)| a == "--status" || a == "-s")
-        .and_then(|(i, _)| std::env::args().nth(i + 1))
-        .unwrap_or_else(|| "@SDProxy".to_string())
+    let args: Vec<String> = std::env::args().collect();
+    for i in 1..args.len() {
+        if (args[i] == "--status" || args[i] == "-s") && i + 1 < args.len() {
+            return args[i + 1].clone();
+        }
+    }
+    "@SDProxy".to_string()
 }
