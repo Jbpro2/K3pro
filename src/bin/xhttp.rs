@@ -29,7 +29,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.7.0 (DTunnel Handshake Fix)");
+    println!("[BDRProxy] xHTTP SplitHTTP v2.8.0 (CDN & Handshake Fix)");
     println!("[xHTTP] Servico xHTTP SplitHTTP rodando na porta: {}", port);
     println!("[xHTTP] SSH backend: 127.0.0.1:{}", ssh_port);
     println!("[xHTTP] Status: {}", status);
@@ -598,14 +598,14 @@ async fn handle_xhttp_get_tls(
         }
     });
 
-    // Handshake compatível com DTunnel (101 seguido de 200)
-    let handshake_101 = format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\n");
-    let _ = tls_stream.write_all(handshake_101.as_bytes()).await;
-    let _ = tls_stream.flush().await;
-
-    // Response streaming
-    let response = format!(
-        "HTTP/1.1 200 OK\r\n\
+    // Handshake simplificado para máxima compatibilidade (DTunnel + CDNs)
+    // Envia 101 e 200 em um único bloco para evitar delays de rede
+    let full_handshake = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Connection: upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Accept: DTUNNEL\r\n\r\n\
+         HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
          Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate\r\n\
          Pragma: no-cache\r\n\
@@ -616,8 +616,8 @@ async fn handle_xhttp_get_tls(
          X-Status: {}\r\n\r\n",
         session_id, status
     );
-    tls_stream.write_all(response.as_bytes()).await?;
-    tls_stream.flush().await?;
+    let _ = tls_stream.write_all(full_handshake.as_bytes()).await;
+    let _ = tls_stream.flush().await;
 
     // Stream com Keep-Alive para h1
     loop {
@@ -688,13 +688,13 @@ async fn handle_xhttp_get_raw(
         }
     });
 
-    // Handshake compatível com DTunnel
-    let handshake_101 = format!("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\n");
-    let _ = stream.write_all(handshake_101.as_bytes()).await;
-    let _ = stream.flush().await;
-
-    let response = format!(
-        "HTTP/1.1 200 OK\r\n\
+    // Handshake simplificado para máxima compatibilidade
+    let full_handshake = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Connection: upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Accept: DTUNNEL\r\n\r\n\
+         HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
          Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate\r\n\
          Pragma: no-cache\r\n\
@@ -705,8 +705,8 @@ async fn handle_xhttp_get_raw(
          X-Status: {}\r\n\r\n",
         session_id, status
     );
-    stream.write_all(response.as_bytes()).await?;
-    stream.flush().await?;
+    let _ = stream.write_all(full_handshake.as_bytes()).await;
+    let _ = stream.flush().await;
 
     loop {
         match timeout(Duration::from_secs(30), get_rx.recv()).await {
