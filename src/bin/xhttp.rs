@@ -271,12 +271,15 @@ async fn handle_h2_get(
         }
     });
 
-    // Construir response HTTP/2 com streaming
+    // Construir response HTTP/2 com streaming e headers de compatibilidade CDN
     let response: http::Response<()> = http::Response::builder()
         .status(200)
         .header("content-type", "application/octet-stream")
-        .header("cache-control", "no-cache, no-store, must-revalidate")
+        .header("cache-control", "no-cache, no-store, must-revalidate, proxy-revalidate")
         .header("pragma", "no-cache")
+        .header("expires", "0")
+        .header("connection", "keep-alive")
+        .header("x-accel-buffering", "no") // Importante para CDNs
         .header("x-session-id", &sid)
         .header("x-status", status)
         .body(())
@@ -294,13 +297,14 @@ async fn handle_h2_get(
 
     println!("[xHTTP h2 GET] Streaming iniciado para session {}", sid);
 
-    // Stream dados do canal GET para o cliente
+    // Stream dados do canal GET para o cliente com Keep-Alive
     loop {
-        match timeout(Duration::from_secs(60), get_rx.recv()).await {
+        // Espera dados do SSH ou envia um ping se ficar muito tempo parado
+        match timeout(Duration::from_secs(30), get_rx.recv()).await {
             Ok(Some(data)) => {
                 let chunk = bytes::Bytes::from(data);
                 if send_stream.send_data(chunk, false).is_err() {
-                    println!("[xHTTP h2 GET] Erro send_data");
+                    println!("[xHTTP h2 GET] Erro send_data (stream closed)");
                     break;
                 }
             }
@@ -309,7 +313,12 @@ async fn handle_h2_get(
                 break;
             }
             Err(_) => {
-                // Timeout - continua
+                // Envia um frame vazio como Keep-Alive para manter a CDN/DTUNNEL ativos
+                // Alguns clientes SplitHTTP ignoram frames vazios, mas eles mantêm o stream h2 aberto
+                if send_stream.send_data(bytes::Bytes::new(), false).is_err() {
+                    println!("[xHTTP h2 GET] Erro send_data (Keep-Alive failed)");
+                    break;
+                }
             }
         }
     }
@@ -591,10 +600,11 @@ async fn handle_xhttp_get_tls(
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
-         Cache-Control: no-cache, no-store, must-revalidate\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate\r\n\
          Pragma: no-cache\r\n\
          Expires: 0\r\n\
          Connection: keep-alive\r\n\
+         X-Accel-Buffering: no\r\n\
          X-Session-ID: {}\r\n\
          X-Status: {}\r\n\r\n",
         session_id, status
@@ -602,14 +612,18 @@ async fn handle_xhttp_get_tls(
     tls_stream.write_all(response.as_bytes()).await?;
     tls_stream.flush().await?;
 
-    // Stream
+    // Stream com Keep-Alive para h1
     loop {
-        match timeout(Duration::from_secs(60), get_rx.recv()).await {
+        match timeout(Duration::from_secs(30), get_rx.recv()).await {
             Ok(Some(data)) => {
                 if tls_stream.write_all(&data).await.is_err() { break; }
-                if tls_stream.flush().await.is_err() { break; }
+                let _ = tls_stream.flush().await;
             }
-            _ => break,
+            Ok(None) => break,
+            Err(_) => {
+                // Keep-Alive: envia um frame vazio/flush para manter conexão ativa
+                let _ = tls_stream.flush().await;
+            }
         }
     }
 
@@ -670,10 +684,11 @@ async fn handle_xhttp_get_raw(
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
-         Cache-Control: no-cache, no-store, must-revalidate\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate\r\n\
          Pragma: no-cache\r\n\
          Expires: 0\r\n\
          Connection: keep-alive\r\n\
+         X-Accel-Buffering: no\r\n\
          X-Session-ID: {}\r\n\
          X-Status: {}\r\n\r\n",
         session_id, status
@@ -682,12 +697,15 @@ async fn handle_xhttp_get_raw(
     stream.flush().await?;
 
     loop {
-        match timeout(Duration::from_secs(60), get_rx.recv()).await {
+        match timeout(Duration::from_secs(30), get_rx.recv()).await {
             Ok(Some(data)) => {
                 if stream.write_all(&data).await.is_err() { break; }
-                if stream.flush().await.is_err() { break; }
+                let _ = stream.flush().await;
             }
-            _ => break,
+            Ok(None) => break,
+            Err(_) => {
+                let _ = stream.flush().await;
+            }
         }
     }
 
