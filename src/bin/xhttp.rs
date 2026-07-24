@@ -142,8 +142,13 @@ async fn handle_h2_xhttp(
 ) -> Result<(), XhttpError> {
     println!("[xHTTP h2] Iniciando handshake HTTP/2...");
 
-    // Handshake HTTP/2
-    let mut h2_conn = match h2::server::handshake(tls_stream).await {
+    // Handshake HTTP/2 com limites aumentados para evitar travamentos
+    let mut h2_builder = h2::server::Builder::new();
+    h2_builder.initial_window_size(2147483647); // Máximo (2GB)
+    h2_builder.initial_connection_window_size(2147483647);
+    h2_builder.max_frame_size(16384);
+    
+    let mut h2_conn = match h2_builder.handshake(tls_stream).await {
         Ok(c) => c,
         Err(e) => {
             println!("[xHTTP h2] Handshake falhou: {}", e);
@@ -296,6 +301,9 @@ async fn handle_h2_get(
     };
 
     println!("[xHTTP h2 GET] Streaming iniciado para session {}", sid);
+
+    // Kickstart: envia um frame vazio imediatamente para "acordar" o download no cliente
+    let _ = send_stream.send_data(bytes::Bytes::new(), false);
 
     // Stream dados do canal GET para o cliente com Keep-Alive
     loop {
@@ -853,6 +861,20 @@ fn extract_session_id(path: &str) -> String {
 }
 
 fn extract_session_id_h2(path: &str) -> String {
+    // Tenta extrair do path /ssh/ID
+    if let Some(pos) = path.find("/ssh/") {
+        let sid = path[pos + 5..].split('?').next().unwrap_or("");
+        if !sid.is_empty() { return sid.to_string(); }
+    }
+    // Tenta extrair de query param ?session=ID ou ?id=ID
+    if let Some(pos) = path.find("session=") {
+        let sid = path[pos + 8..].split('&').next().unwrap_or("");
+        if !sid.is_empty() { return sid.to_string(); }
+    }
+    if let Some(pos) = path.find("id=") {
+        let sid = path[pos + 3..].split('&').next().unwrap_or("");
+        if !sid.is_empty() { return sid.to_string(); }
+    }
     extract_session_id(path)
 }
 
