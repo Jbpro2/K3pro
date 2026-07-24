@@ -29,7 +29,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP SplitHTTP v2.8.0 (CDN & Handshake Fix)");
+    println!("[BDRProxy] xHTTP SplitHTTP v2.9.0 (Ultra Debug & Socket Fix)");
     println!("[xHTTP] Servico xHTTP SplitHTTP rodando na porta: {}", port);
     println!("[xHTTP] SSH backend: 127.0.0.1:{}", ssh_port);
     println!("[xHTTP] Status: {}", status);
@@ -44,10 +44,13 @@ async fn main() -> Result<(), XhttpError> {
     loop {
         match listener.accept().await {
             Ok((client_stream, addr)) => {
+                // Otimização de socket
+                let _ = client_stream.set_nodelay(true);
+                println!("[xHTTP] Nova conexão de: {}", addr);
                 let status = status_arc.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_xhttp_client(client_stream, &status, ssh_port).await {
-                        println!("[xHTTP] Erro cliente {}: {}", addr, e);
+                        println!("[xHTTP] Finalizado para {}: {}", addr, e);
                     }
                 });
             }
@@ -598,26 +601,22 @@ async fn handle_xhttp_get_tls(
         }
     });
 
-    // Handshake simplificado para máxima compatibilidade (DTunnel + CDNs)
-    // Envia 101 e 200 em um único bloco para evitar delays de rede
-    let full_handshake = format!(
-        "HTTP/1.1 101 Switching Protocols\r\n\
-         Connection: upgrade\r\n\
-         Upgrade: websocket\r\n\
-         Sec-WebSocket-Accept: DTUNNEL\r\n\r\n\
-         HTTP/1.1 200 OK\r\n\
+    // Handshake ultra-compatível
+    let h101 = "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Accept: DTUNNEL\r\n\r\n";
+    let _ = tls_stream.write_all(h101.as_bytes()).await;
+    let _ = tls_stream.flush().await;
+
+    let h200 = format!(
+        "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
-         Cache-Control: no-cache, no-store, must-revalidate, proxy-revalidate\r\n\
-         Pragma: no-cache\r\n\
-         Expires: 0\r\n\
          Connection: keep-alive\r\n\
-         X-Accel-Buffering: no\r\n\
          X-Session-ID: {}\r\n\
          X-Status: {}\r\n\r\n",
         session_id, status
     );
-    let _ = tls_stream.write_all(full_handshake.as_bytes()).await;
+    let _ = tls_stream.write_all(h200.as_bytes()).await;
     let _ = tls_stream.flush().await;
+    println!("[xHTTP GET TLS] Handshake enviado para {}", session_id);
 
     // Stream com Keep-Alive para h1
     loop {
