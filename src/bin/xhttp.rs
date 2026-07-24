@@ -14,6 +14,7 @@ struct XhttpSession {
     post_tx: mpsc::Sender<Vec<u8>>,
     get_tx: mpsc::Sender<Vec<u8>>,
     active: Arc<RwLock<bool>>,
+    next_seq: Arc<Mutex<u64>>,
 }
 
 static SESSIONS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, XhttpSession>>>> =
@@ -25,7 +26,7 @@ async fn main() -> Result<(), Error> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[SDProxy] xHTTP SplitHTTP + SSL TUNNEL (v2.3.7)");
+    println!("[SDProxy] xHTTP SplitHTTP + XHTTP TLS (v2.3.9)");
     let listener = TcpListener::bind(format!("[::]:{}", port)).await?;
     let status_arc = Arc::new(status);
 
@@ -166,13 +167,14 @@ async fn handle_xhttp_get_tls(mut tls_stream: impl AsyncReadExt + AsyncWriteExt 
     let session_id = extract_session_id(path);
     let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
     let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
-    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(1024);
-    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(2048);
+    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(2048);
     let active = Arc::new(RwLock::new(true));
+    let next_seq = Arc::new(Mutex::new(0u64));
 
     {
         let mut sessions = SESSIONS.lock().await;
-        sessions.insert(session_id.clone(), XhttpSession { post_tx, get_tx: get_tx.clone(), active: active.clone() });
+        sessions.insert(session_id.clone(), XhttpSession { post_tx, get_tx: get_tx.clone(), active: active.clone(), next_seq });
     }
 
     tokio::spawn(async move {
@@ -193,7 +195,18 @@ async fn handle_xhttp_get_tls(mut tls_stream: impl AsyncReadExt + AsyncWriteExt 
         }
     });
 
-    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: keep-alive\r\nKeep-Alive: timeout=60\r\nX-Session-ID: {}\r\nX-Status: {}\r\n\r\n", session_id, status);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Connection: keep-alive\r\n\
+         Cache-Control: no-cache, no-store, must-revalidate\r\n\
+         Pragma: no-cache\r\n\
+         Expires: 0\r\n\
+         X-Session-ID: {}\r\n\
+         X-Status: {}\r\n\r\n",
+        session_id, status
+    );
+
     tls_stream.write_all(response.as_bytes()).await?;
     tls_stream.flush().await?;
 
@@ -209,13 +222,14 @@ async fn handle_xhttp_get_raw(mut stream: TcpStream, path: &str, status: &str, s
     let session_id = extract_session_id(path);
     let ssh_stream = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await?;
     let (mut ssh_read, mut ssh_write) = ssh_stream.into_split();
-    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(1024);
-    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(1024);
+    let (post_tx, mut post_rx) = mpsc::channel::<Vec<u8>>(2048);
+    let (get_tx, mut get_rx) = mpsc::channel::<Vec<u8>>(2048);
     let active = Arc::new(RwLock::new(true));
+    let next_seq = Arc::new(Mutex::new(0u64));
 
     {
         let mut sessions = SESSIONS.lock().await;
-        sessions.insert(session_id.clone(), XhttpSession { post_tx, get_tx: get_tx.clone(), active: active.clone() });
+        sessions.insert(session_id.clone(), XhttpSession { post_tx, get_tx: get_tx.clone(), active: active.clone(), next_seq });
     }
 
     tokio::spawn(async move {
@@ -287,7 +301,6 @@ async fn handle_xhttp_post_raw(mut stream: TcpStream, full_request: &[u8], path:
 fn extract_session_id(path: &str) -> String {
     let p = path.trim_start_matches('/');
     let parts: Vec<&str> = p.split('/').collect();
-    // Tenta pegar o ID de várias formas: /ssh/ID, /session/ID ou apenas /ID
     if parts.len() >= 2 && (parts[0] == "ssh" || parts[0] == "session" || parts[0] == "revive") {
         parts[1].to_string()
     } else if !parts.is_empty() {
@@ -319,8 +332,6 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
     let mut key_reader = std::io::BufReader::new(key_file);
     let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?.into_iter().map(Certificate).collect();
     let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?.into_iter().map(PrivateKey).collect();
-    
-    // Suporte híbrido: TLS 1.2 e TLS 1.3
     let mut config = rustls::ServerConfig::builder()
         .with_cipher_suites(&rustls::ALL_CIPHER_SUITES)
         .with_kx_groups(&rustls::ALL_KX_GROUPS)
@@ -329,8 +340,6 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
         .with_no_client_auth()
         .with_single_cert(certs, keys.into_iter().next().unwrap())
         .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
-    
-    // ALPN fixo em http/1.1 para evitar travamentos h2
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(config)
 }
