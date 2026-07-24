@@ -25,13 +25,13 @@ async fn main() -> Result<(), Error> {
     let ssh_port = get_ssh_port();
 
     println!("[SDProxy] ═══════════════════════════════════════════");
-    println!("[SDProxy]  xHTTP SplitHTTP + SSL TUNNEL");
+    println!("[SDProxy]  xHTTP SplitHTTP + SSL TUNNEL (v2.3.2)");
     println!("[SDProxy] ═══════════════════════════════════════════");
     println!("[SDProxy] Porta: {}", port);
     println!("[SDProxy] SSH Backend: 127.0.0.1:{}", ssh_port);
     println!("[SDProxy] Status: {}", status);
-    println!("[SDProxy] Certs: /opt/sdproxy/cert.pem + key.pem");
     println!("[SDProxy] Protocolos: xHTTP | SSL Tunnel | HTTP");
+    println!("[SDProxy] TLS: Forçado v1.2 (Compatibilidade)");
     println!("[SDProxy] ═══════════════════════════════════════════");
     println!("[SDProxy] Aguardando conexões...");
 
@@ -74,7 +74,7 @@ async fn handle_client(
 
     let first_byte = peek_buf[0];
 
-    // TLS Handshake detectado
+    // TLS Handshake detectado (0x16)
     if first_byte == 0x16 {
         return handle_tls_connection(stream, status, ssh_port).await;
     }
@@ -84,7 +84,6 @@ async fn handle_client(
         return handle_http_raw(stream, status, ssh_port).await;
     }
 
-    // Outros dados (SSH direto, etc)
     handle_raw_tunnel(stream, ssh_port).await
 }
 
@@ -137,7 +136,6 @@ async fn handle_tls_connection(
                     let header_end = p + 4;
                     let body_already = total_read - header_end;
 
-                    // Se for POST com corpo, ler o corpo completo
                     if content_length > 0 && body_already < content_length {
                         let remaining = content_length - body_already;
                         let mut body_buf = vec![0u8; remaining];
@@ -172,7 +170,6 @@ async fn handle_tls_connection(
 
     let tls_combined = tls_read.unsplit(tls_write);
 
-    // Roteamento baseado no path
     if is_xhttp_path(&path) {
         match method.as_str() {
             "GET" => handle_xhttp_get(tls_combined, &path, status, ssh_port).await,
@@ -180,28 +177,16 @@ async fn handle_tls_connection(
             _ => Ok(()),
         }
     } else {
-        // Se não for xHTTP, trata como SSL Tunnel (Injector)
         handle_ssl_tunnel_after_tls(tls_combined, &http_str, status, ssh_port).await
     }
 }
 
-/// Verifica se o path pertence ao protocolo xHTTP
 fn is_xhttp_path(path: &str) -> bool {
     let p = path.trim_start_matches('/');
     if p.is_empty() { return false; }
-    
-    // Suporta /ssh/{sid} ou apenas /{sid}
-    if p.starts_with("ssh/") || p == "ssh" {
-        return true;
-    }
-    
-    // O SocksRevive gera IDs hexadecimais ou revive-*. 
-    // Vamos aceitar qualquer path que tenha uma estrutura de ID.
+    if p.starts_with("ssh/") || p == "ssh" { return true; }
     let parts: Vec<&str> = p.split('/').collect();
-    if !parts[0].is_empty() {
-        return true; 
-    }
-    
+    if !parts[0].is_empty() { return true; }
     false
 }
 
@@ -214,7 +199,6 @@ async fn handle_ssl_tunnel_after_tls(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), Error> {
-    // Resposta compatível com Injector
     let resp101 = format!("HTTP/1.1 101 ({})\r\n\r\n", status);
     stream.write_all(resp101.as_bytes()).await?;
     
@@ -247,7 +231,7 @@ async fn handle_raw_tunnel_tls(
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HTTP RAW — xHTTP ou SSL Tunnel via HTTP (sem TLS)
+// HTTP RAW — xHTTP ou SSL Tunnel via HTTP
 // ═══════════════════════════════════════════════════════════════
 async fn handle_http_raw(
     mut stream: TcpStream,
@@ -365,7 +349,6 @@ async fn handle_xhttp_get(
         });
     }
 
-    // Response Headers compatíveis com SocksRevive
     let response = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/octet-stream\r\n\
@@ -545,7 +528,19 @@ fn build_tls_config(cert_path: &str, key_path: &str) -> Result<rustls::ServerCon
     let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)?.into_iter().map(Certificate).collect();
     let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)?.into_iter().map(PrivateKey).collect();
     if certs.is_empty() || keys.is_empty() { return Err(Error::new(std::io::ErrorKind::Other, "Certs ou keys vazios")); }
-    let config = rustls::ServerConfig::builder().with_safe_defaults().with_no_client_auth().with_single_cert(certs, keys.into_iter().next().unwrap()).map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+    
+    // Forçar TLSv1.2 e remover ALPN h2 para evitar erros de negociação
+    let mut config = rustls::ServerConfig::builder()
+        .with_safe_default_cipher_suites()
+        .with_safe_default_kx_groups()
+        .with_protocol_versions(&[&rustls::version::TLS12])
+        .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?
+        .with_no_client_auth()
+        .with_single_cert(certs, keys.into_iter().next().unwrap())
+        .map_err(|e| Error::new(std::io::ErrorKind::Other, e))?;
+    
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    
     Ok(config)
 }
 
