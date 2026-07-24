@@ -28,7 +28,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP v3.3.2 (Dual Mode: XHTTP + SSL Tunnel)");
+    println!("[BDRProxy] xHTTP v3.3.3 (Full Transparent Mode)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
@@ -66,7 +66,8 @@ async fn handle_xhttp_client(stream: TcpStream, status: &str, ssh_port: u16) -> 
         return handle_tls_dual(stream, status, ssh_port).await;
     }
 
-    if first_byte == 0x47 || first_byte == 0x50 || first_byte == 0x48 {
+    // Detecta se parece ser HTTP (qualquer método começa com letra maiúscula)
+    if first_byte >= 0x41 && first_byte <= 0x5A {
         return handle_http_xhttp_raw(stream, status, ssh_port).await;
     }
 
@@ -82,7 +83,7 @@ async fn handle_tls_dual(stream: TcpStream, status: &str, ssh_port: u16) -> Resu
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| Box::new(e) as XhttpError)?;
 
     let mut buf = vec![0u8; 4096];
-    let n = match timeout(Duration::from_secs(5), tls_stream.read(&mut buf)).await {
+    let n = match timeout(Duration::from_secs(3), tls_stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => n,
         _ => return handle_ssh_direct_tls(tls_stream, ssh_port, None).await,
     };
@@ -90,7 +91,9 @@ async fn handle_tls_dual(stream: TcpStream, status: &str, ssh_port: u16) -> Resu
     let data = &buf[..n];
     let http_str = String::from_utf8_lossy(data);
     
-    if http_str.starts_with("GET ") || http_str.starts_with("POST ") || http_str.starts_with("HEAD ") {
+    // DETECÇÃO XHTTP RIGOROSA:
+    // Se for especificamente o protocolo XHTTP (com x-session-id ou caminhos conhecidos)
+    if (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
         if let Some((method, path)) = parse_http_request(&http_str) {
             match method.as_str() {
                 "GET" => return handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
@@ -100,6 +103,7 @@ async fn handle_tls_dual(stream: TcpStream, status: &str, ssh_port: u16) -> Resu
         }
     }
 
+    // Para QUALQUER outro caso (PUT, ACL, GET normal, etc.), tratamos como túnel transparente
     handle_ssh_direct_tls(tls_stream, ssh_port, Some(data.to_vec())).await
 }
 
@@ -111,7 +115,7 @@ async fn handle_ssh_direct(mut stream: TcpStream, ssh_port: u16) -> Result<(), X
     Ok(())
 }
 
-async fn handle_ssh_direct_tls(mut tls_stream: tokio_rustls::server::TlsStream<TcpStream>, ssh_port: u16, initial_data: Option<Vec<u8>>) -> Result<(), XhttpError> {
+async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpStream>, ssh_port: u16, initial_data: Option<Vec<u8>>) -> Result<(), XhttpError> {
     let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     if let Some(data) = initial_data { ssh.write_all(&data).await.map_err(|e| Box::new(e) as XhttpError)?; }
     let (mut r, mut w) = tokio::io::split(tls_stream);
@@ -124,13 +128,17 @@ async fn handle_http_xhttp_raw(mut stream: TcpStream, status: &str, ssh_port: u1
     let mut buf = vec![0u8; 8192];
     let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
     let http_str = String::from_utf8_lossy(&buf[..n]);
-    if let Some((method, path)) = parse_http_request(&http_str) {
-        match method.as_str() {
-            "GET" => return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
-            "POST" => return handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
-            _ => {}
+    
+    if (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
+        if let Some((method, path)) = parse_http_request(&http_str) {
+            match method.as_str() {
+                "GET" => return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
+                "POST" => return handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
+                _ => {}
+            }
         }
     }
+    
     let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     ssh.write_all(&buf[..n]).await.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut r, mut w) = stream.into_split();
@@ -138,6 +146,8 @@ async fn handle_http_xhttp_raw(mut stream: TcpStream, status: &str, ssh_port: u1
     let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
     Ok(())
 }
+
+// --- XHTTP Implementation ---
 
 async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let (sid, _) = extract_path_info(path);
@@ -251,4 +261,3 @@ fn build_tls_config(cp: &str, kp: &str) -> Result<rustls::ServerConfig, XhttpErr
 fn get_port() -> u16 { std::env::args().enumerate().find(|(_, a)| a == "--port" || a == "-p").and_then(|(i, _)| std::env::args().nth(i+1)).and_then(|a| a.parse().ok()).unwrap_or(443) }
 fn get_ssh_port() -> u16 { std::env::args().enumerate().find(|(_, a)| a == "--ssh-port").and_then(|(i, _)| std::env::args().nth(i+1)).and_then(|a| a.parse().ok()).unwrap_or(22) }
 fn get_status() -> String { std::env::args().enumerate().find(|(_, a)| a == "--status" || a == "-s").and_then(|(i, _)| std::env::args().nth(i+1)).unwrap_or("@SDProxy".to_string()) }
-fn generate_session_id() -> String { format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()) }
