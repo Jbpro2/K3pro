@@ -1,5 +1,5 @@
 #!/bin/bash
-# SDProxy Installer - Version v2.3.6
+# SDProxy Installer - Version v2.3.8
 
 REPO_URL="https://github.com/PedroJbk/BDRProxy.git"
 REPO_BRANCH="main"
@@ -47,79 +47,72 @@ echo -e "${BLUE}${BOLD} ╚════██║██║  ██║██╔═
 echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
 echo -e "${BLUE}${BOLD} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
-log_info "Iniciando instalação do SDProxy v2.3.6..."
+log_info "Iniciando instalação do SDProxy v2.3.8..."
 
 # --- Etapa 1 ---
-show_progress "Atualizando repositórios e instalando dependências..."
-apt update -y > /dev/null 2>&1 || log_error "Falha ao atualizar repositórios."
-apt install -y curl build-essential git lsb-release libssl-dev pkg-config openssl openssh-server > /dev/null 2>&1 || log_error "Falha ao instalar dependências."
+show_progress "Atualizando dependências..."
+apt update -y > /dev/null 2>&1
+apt install -y curl build-essential git libssl-dev pkg-config openssl > /dev/null 2>&1
 
 # --- Etapa 2 ---
-show_progress "Verificando e instalando o Rust..."
+show_progress "Verificando Rust..."
 if ! command -v cargo &> /dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1
-    source "$HOME/.cargo/env" || log_error "Falha ao configurar o ambiente Rust."
+    source "$HOME/.cargo/env"
 else
-    log_info "Rust já está instalado."
     source "$HOME/.cargo/env"
 fi
 
 # --- Etapa 3 ---
-show_progress "Baixando o código fonte do SDProxy..."
-rm -rf /root/SDProxy_build
-git clone --branch "$REPO_BRANCH" "$REPO_URL" /root/SDProxy_build > /dev/null 2>&1 || log_error "Falha ao clonar o repositório."
-cd /root/SDProxy_build || log_error "Falha ao entrar no diretório do projeto."
+show_progress "Baixando código fonte..."
+rm -rf /tmp/SDProxy_build
+git clone --branch "$REPO_BRANCH" "$REPO_URL" /tmp/SDProxy_build > /dev/null 2>&1 || log_error "Falha ao clonar repositório."
+cd /tmp/SDProxy_build || log_error "Falha ao acessar diretório."
 
 # --- Etapa 4 ---
-show_progress "Compilando SDProxy + xHTTP (pode levar 2-5 minutos)..."
+show_progress "Compilando (2-5 min)..."
 cargo build --release > /tmp/sdproxy_build.log 2>&1
 if [ $? -ne 0 ]; then
-    log_error "Falha na compilação. Verifique /tmp/sdproxy_build.log"
+    cat /tmp/sdproxy_build.log
+    log_error "Falha na compilação. Veja logs acima."
 fi
 
 # --- Etapa 5 ---
-show_progress "Instalando binários e configurando o sistema..."
-mkdir -p /opt/sdproxy || log_error "Falha ao criar diretório /opt/sdproxy."
+show_progress "Instalando binários..."
+mkdir -p /opt/sdproxy
 
-# Gerar certificados TLS para xHTTP
-if [ ! -f /opt/sdproxy/cert.pem ] || [ ! -f /opt/sdproxy/key.pem ]; then
-    log_info "Gerando certificados TLS auto-assinados..."
-    openssl req -x509 -newkey rsa:2048 -keyout /opt/sdproxy/key.pem \
-        -out /opt/sdproxy/cert.pem -days 3650 -nodes \
-        -subj "/CN=SDProxy" 2>/dev/null
-fi
-chmod 644 /opt/sdproxy/cert.pem
-chmod 600 /opt/sdproxy/key.pem
+# Parar processos antigos para liberar os arquivos
+pkill -f "sdproxy" > /dev/null 2>&1
+pkill -f "sdproxy-xhttp" > /dev/null 2>&1
+sleep 1
 
-# Copiar binários
-cp ./target/release/sdproxy /opt/sdproxy/proxy || log_error "Falha ao copiar sdproxy."
+# Copiar com força (-f)
+cp -f ./target/release/sdproxy /opt/sdproxy/proxy || log_error "Falha ao copiar sdproxy. Verifique se o disco está cheio."
 chmod +x /opt/sdproxy/proxy
 
 if [ -f ./target/release/sdproxy-xhttp ]; then
-    cp ./target/release/sdproxy-xhttp /opt/sdproxy/proxy-xhttp
+    cp -f ./target/release/sdproxy-xhttp /opt/sdproxy/proxy-xhttp
     chmod +x /opt/sdproxy/proxy-xhttp
     ln -sf /opt/sdproxy/proxy-xhttp /usr/local/bin/sdproxy-xhttp
 fi
 
 # Menu
 if [ -f "menu.sh" ]; then
-    cp menu.sh /opt/sdproxy/menu || log_error "Falha ao copiar menu."
+    cp -f menu.sh /opt/sdproxy/menu
     chmod +x /opt/sdproxy/menu
     ln -sf /opt/sdproxy/menu /usr/local/bin/sdproxy
-else
-    ln -sf /opt/sdproxy/proxy /usr/local/bin/sdproxy
+fi
+
+# Certificados
+if [ ! -f /opt/sdproxy/cert.pem ]; then
+    openssl req -x509 -newkey rsa:2048 -keyout /opt/sdproxy/key.pem -out /opt/sdproxy/cert.pem -days 3650 -nodes -subj "/CN=SDProxy" 2>/dev/null
 fi
 
 # --- Etapa 6 ---
-show_progress "Limpando arquivos temporários..."
-rm -rf /root/SDProxy_build
-rm -f /tmp/sdproxy_build.log
+show_progress "Limpando..."
+rm -rf /tmp/SDProxy_build
 
 # --- Etapa 7 ---
-log_success "Instalação do SDProxy v2.3.6 concluída!"
-echo ""
-echo -e "${BLUE}${BOLD}  Comandos:${NC}"
-echo -e "  sdproxy                  → Menu de Gerenciamento"
-echo -e "  sdproxy-xhttp            → Iniciar xHTTP SplitHTTP Direto"
-echo ""
-echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
+log_success "Instalação concluída com sucesso!"
+echo -e "Use o comando ${YELLOW}sdproxy${NC} para abrir o menu."
+echo -e "--------------------------------------------------------------"
