@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ============================================
-# CTProxy Menu - Free v3
+# SDProxy Menu - Free v2.3
 # ============================================
 
-CTPROXY="/opt/ctproxy/proxy"
-CTPROXY_XHTTP="/opt/ctproxy/proxy-xhttp"
+SDPROXY="/opt/sdproxy/proxy"
+SDPROXY_XHTTP="/opt/sdproxy/proxy-xhttp"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Cores
@@ -16,7 +16,6 @@ CYAN='\033[0;36m'
 WHITE='\033[0;37m'
 BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
-PURPLE='\033[0;35m'
 BOLD='\033[1m'
 NC='\033[0m'
 
@@ -64,16 +63,16 @@ box_bottom() {
 }
 
 # ============================================
-# Banner CTPROXY
+# Banner SDPROXY
 # ============================================
 show_banner() {
-    echo -e "${PURPLE}${BOLD}  ██████╗████████╗██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗"
-    echo -e "${RED}${BOLD} ██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝"
-    echo -e "${PURPLE}${BOLD} ██║        ██║   ██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ "
-    echo -e "${RED}${BOLD} ██║        ██║   ██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  "
-    echo -e "${PURPLE}${BOLD} ╚██████╗   ██║   ██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   "
-    echo -e "${RED}${BOLD}  ╚═════╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   "
-    echo -e "${PURPLE}${BOLD}--------------------------------------------------------------${NC}"
+    echo -e "${BLUE}${BOLD} ███████╗██████╗ ██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗"
+    echo -e "${NC} ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝"
+    echo -e "${BLUE}${BOLD} ███████╗██║  ██║██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ "
+    echo -e "${NC} ╚════██║██║  ██║██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  "
+    echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   "
+    echo -e "${NC} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   "
+    echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
 }
 
 # ============================================
@@ -122,7 +121,7 @@ show_menu() {
     show_banner
     echo ""
     box_top
-    box_line "${WHITE}${BOLD}CTProxy Menu Free v2.3${NC}"
+    box_line "${WHITE}${BOLD}SDProxy Menu Free v2.3${NC}"
     box_mid
     show_active_ports
     box_mid
@@ -181,19 +180,19 @@ open_port() {
     HTTPS=$(echo "$HTTPS" | tr '[:upper:]' '[:lower:]')
     echo ""
 
-    read -p "Status HTTP (Padrão: @CTProxy): " STATUS
+    read -p "Status HTTP (Padrão: @SDProxy): " STATUS
     if [[ -z "$STATUS" ]]; then
-        STATUS="@CTProxy"
+        STATUS="@SDProxy"
     fi
 
     read -p "Habilitar somente SSH? (s/n): " SSH_ONLY
     SSH_ONLY=$(echo "$SSH_ONLY" | tr '[:upper:]' '[:lower:]')
     echo ""
 
-    mkdir -p /opt/ctproxy
+    mkdir -p /opt/sdproxy
 
-    if [ ! -f "$CTPROXY" ]; then
-        echo -e "${RED}CTProxy não encontrado! Execute o install.sh primeiro.${NC}"
+    if [ ! -f "$SDPROXY" ]; then
+        echo -e "${RED}SDProxy não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
     fi
@@ -243,17 +242,17 @@ open_xhttp() {
         return
     fi
 
-    mkdir -p /opt/ctproxy
+    mkdir -p /opt/sdproxy
 
-    if [ ! -f "$CTPROXY_XHTTP" ]; then
-        echo -e "${RED}ctproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
+    if [ ! -f "$SDPROXY_XHTTP" ]; then
+        echo -e "${RED}sdproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
     fi
 
-    read -p "Status HTTP (Padrão: @CTProxy): " STATUS
+    read -p "Status HTTP (Padrão: @SDProxy): " STATUS
     if [[ -z "$STATUS" ]]; then
-        STATUS="@CTProxy"
+        STATUS="@SDProxy"
     fi
 
     read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
@@ -262,11 +261,11 @@ open_xhttp() {
     fi
 
     echo -e "${GREEN}Verificando certificados TLS...${NC}"
-    if [ ! -f "/opt/ctproxy/cert.pem" ] || [ ! -f "/opt/ctproxy/key.pem" ]; then
+    if [ ! -f "/opt/sdproxy/cert.pem" ] || [ ! -f "/opt/sdproxy/key.pem" ]; then
         echo -e "${YELLOW}Gerando certificado auto-assinado...${NC}"
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/ctproxy/key.pem \
-            -out /opt/ctproxy/cert.pem -days 365 -nodes \
-            -subj "/CN=ctproxy/O=CTProxy/C=BR" 2>/dev/null
+        openssl req -x509 -newkey rsa:2048 -keyout /opt/sdproxy/key.pem \
+            -out /opt/sdproxy/cert.pem -days 365 -nodes \
+            -subj "/CN=sdproxy/O=SDProxy/C=BR" 2>/dev/null
         echo -e "${GREEN}Certificados gerados.${NC}"
     else
         echo -e "${GREEN}Certificados TLS existentes.${NC}"
@@ -347,16 +346,16 @@ create_service() {
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=CTProxy - Porta ${PORT}
+Description=SDProxy - Porta ${PORT}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${CTPROXY} ${EXTRA_ARGS}
+ExecStart=${SDPROXY} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/ctproxy
+WorkingDirectory=/opt/sdproxy
 
 [Install]
 WantedBy=multi-user.target
@@ -376,16 +375,16 @@ create_xhttp_service() {
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=CTProxy xHTTP + SSL Tunnel - Porta ${PORT}
+Description=SDProxy xHTTP + SSL Tunnel - Porta ${PORT}
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=${CTPROXY_XHTTP} ${EXTRA_ARGS}
+ExecStart=${SDPROXY_XHTTP} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/ctproxy
+WorkingDirectory=/opt/sdproxy
 
 [Install]
 WantedBy=multi-user.target
