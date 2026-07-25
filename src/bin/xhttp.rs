@@ -28,7 +28,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP v3.3.6 (DTUNNEL + SocksRevive High-Compatibility)");
+    println!("[BDRProxy] xHTTP v3.3.7 (DTUNNEL + SocksRevive Final Fix)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
@@ -56,7 +56,6 @@ async fn handle_xhttp_client(
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
     let mut peek_buf = [0u8; 3];
-    // Timeouts aumentados para redes móveis instáveis
     let peek_result = timeout(Duration::from_secs(3), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
@@ -92,8 +91,6 @@ async fn handle_tls_dual(
     let key_path = "/opt/lkproxy/key.pem";
 
     let mut config = build_tls_config(cert_path, key_path)?;
-    // IMPORTANTE: Removemos 'h2' para forçar 'http/1.1' em ambos. 
-    // Isso resolve o travamento "XHTTP proto=h2" no SocksRevive, pois o servidor é otimizado para HTTP/1.1 Split.
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -180,15 +177,29 @@ async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpSt
 async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let (sid, _) = extract_path_info(path);
     
-    // Limpeza agressiva de sessão anterior para reconexão rápida
     {
         let mut sessions = SESSIONS.lock().await;
         if let Some(old) = sessions.get(&sid) {
-            let mut a = old.active.write().await;
-            *a = false;
+            let _ = old.active.write().await;
         }
         sessions.remove(&sid);
     }
+
+    // RESPOSTA IMEDIATA PARA DTUNNEL
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\n\
+        Content-Type: application/octet-stream\r\n\
+        Transfer-Encoding: chunked\r\n\
+        Connection: keep-alive\r\n\
+        Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
+        Pragma: no-cache\r\n\
+        Expires: 0\r\n\
+        X-Session-ID: {}\r\n\
+        X-Status: {}\r\n\r\n", 
+        sid, status
+    );
+    tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
     let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut sr, mut sw) = ssh.into_split();
@@ -220,23 +231,6 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         *a = false;
     });
 
-    // Headers otimizados para DTUNNEL reconhecer o download iniciado
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-        Content-Type: application/octet-stream\r\n\
-        Transfer-Encoding: chunked\r\n\
-        Connection: keep-alive\r\n\
-        Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
-        Pragma: no-cache\r\n\
-        Expires: 0\r\n\
-        X-Session-ID: {}\r\n\
-        X-Status: {}\r\n\r\n", 
-        sid, status
-    );
-    
-    tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
-    tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?; // Flush imediato para o DTUNNEL
-    
     while let Some(d) = grx.recv().await {
         if !*act.read().await { break; }
         if tls.write_all(format!("{:x}\r\n", d.len()).as_bytes()).await.is_err() { break; }
@@ -257,11 +251,25 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     {
         let mut sessions = SESSIONS.lock().await;
         if let Some(old) = sessions.get(&sid) {
-            let mut a = old.active.write().await;
-            *a = false;
+            let _ = old.active.write().await;
         }
         sessions.remove(&sid);
     }
+
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\n\
+        Content-Type: application/octet-stream\r\n\
+        Transfer-Encoding: chunked\r\n\
+        Connection: keep-alive\r\n\
+        Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
+        Pragma: no-cache\r\n\
+        Expires: 0\r\n\
+        X-Session-ID: {}\r\n\
+        X-Status: {}\r\n\r\n", 
+        sid, status
+    );
+    stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    stream.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
     let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut sr, mut sw) = ssh.into_split();
@@ -293,22 +301,6 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         *a = false;
     });
 
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-        Content-Type: application/octet-stream\r\n\
-        Transfer-Encoding: chunked\r\n\
-        Connection: keep-alive\r\n\
-        Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
-        Pragma: no-cache\r\n\
-        Expires: 0\r\n\
-        X-Session-ID: {}\r\n\
-        X-Status: {}\r\n\r\n", 
-        sid, status
-    );
-    
-    stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
-    stream.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
-    
     while let Some(d) = grx.recv().await {
         if !*act.read().await { break; }
         if stream.write_all(format!("{:x}\r\n", d.len()).as_bytes()).await.is_err() { break; }
