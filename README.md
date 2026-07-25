@@ -17,7 +17,7 @@ Proxy multi-protocolo em Rust com suporte exclusivo para o protocolo xHTTP (Spli
 
 ```bash
 # Clonar ou copiar os arquivos para o servidor
-git clone https://github.com/PedroJbk/SDProxy.git
+git clone https://github.com/PedroJbk/CTProxy.git
 cd SDProxy
 
 # Substituir os arquivos pelo v2.0
