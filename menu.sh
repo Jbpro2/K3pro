@@ -1,491 +1,119 @@
 #!/bin/bash
+# CTProxy Installer - Version v3.1.0
 
-# ============================================
-# SDProxy Menu - Free v2.3
-# ============================================
+REPO_URL="https://github.com/MTSPRO2/CTProxy.git"
+REPO_BRANCH="main"
+CMD_NAME="ctproxy"
+TOTAL_STEPS=7
 
-SDPROXY="/opt/sdproxy/proxy"
-SDPROXY_XHTTP="/opt/sdproxy/proxy-xhttp"
-SYSTEMD_DIR="/etc/systemd/system"
+CURRENT_STEP=0
 
-# Cores
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-CYAN='\033[0;36m'
-WHITE='\033[0;37m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-BOLD='\033[1m'
-NC='\033[0m'
+# --- Cores e Estilos ---
+GREEN="\033[0;32m"
+BLUE="\033[0;34m"
+RED="\033[0;31m"
+YELLOW="\033[1;33m"
+NC="\033[0m"
+BOLD="\033[1m"
 
-BOX_WIDTH=46   
-
-strip_len() {
-    local clean
-    clean=$(echo -ne "$1" | sed -r 's/\x1B\[[0-9;]*[mK]//g')
-    echo -n "${#clean}"
+log_info() {
+    echo -e "${BLUE}${BOLD}[INFO]${NC} $1"
 }
 
-NBSP=$'\xc2\xa0'
-
-box_line() {
-    local content="$1"
-    local visible_len
-    visible_len=$(strip_len "$content")
-    local pad=$(( BOX_WIDTH - visible_len ))
-    [ $pad -lt 0 ] && pad=0
-    echo -ne "${CYAN}║${NC} "
-    echo -ne "${content}"
-    local i
-    for ((i=0; i<pad; i++)); do
-        printf '%s' "$NBSP"
-    done
-    echo -e "${CYAN}║${NC}"
+log_success() {
+    echo -e "${GREEN}${BOLD}[SUCESSO]${NC} $1"
 }
 
-box_top() {
-    printf "${CYAN}╔"
-    printf '═%.0s' $(seq 1 $((BOX_WIDTH + 2)))
-    printf "╗${NC}\n"
+log_error() {
+    echo -e "${RED}${BOLD}[ERRO]${NC} $1"
+    exit 1
 }
 
-box_mid() {
-    printf "${CYAN}╠"
-    printf '═%.0s' $(seq 1 $((BOX_WIDTH + 2)))
-    printf "╣${NC}\n"
+show_progress() {
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+    PERCENT=$((CURRENT_STEP * 100 / TOTAL_STEPS))
+    log_info "${PERCENT}% - $1"
 }
 
-box_bottom() {
-    printf "${CYAN}╚"
-    printf '═%.0s' $(seq 1 $((BOX_WIDTH + 2)))
-    printf "╝${NC}\n"
-}
+# --- Verificação de Root ---
+if [ "$EUID" -ne 0 ]; then
+    log_error "Este script precisa ser executado como ROOT."
+fi
 
-# ============================================
-# Banner SDPROXY
-# ============================================
-show_banner() {
-    echo -e "${BLUE}${BOLD} ███████╗██████╗ ██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗"
-    echo -e "${NC} ██╔════╝██╔══██╗██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝"
-    echo -e "${BLUE}${BOLD} ███████╗██║  ██║██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ "
-    echo -e "${NC} ╚════██║██║  ██║██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  "
-    echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   "
-    echo -e "${NC} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   "
-    echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
-}
+clear
+echo -e "${BLUE}${BOLD} ██████╗████████╗██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗${NC}"
+echo -e "${BLUE}${BOLD}██╔════╝╚══██╔══╝██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝${NC}"
+echo -e "${BLUE}${BOLD}██║        ██║   ██████╔╝██████╔╝██║   ██║ ╚███╔╝  ╚████╔╝ ${NC}"
+echo -e "${BLUE}${BOLD}██║        ██║   ██╔═══╝ ██╔══██╗██║   ██║ ██╔██╗   ╚██╔╝  ${NC}"
+echo -e "${BLUE}${BOLD}╚██████╗   ██║   ██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
+echo -e "${BLUE}${BOLD} ╚═════╝   ╚═╝   ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
+echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
+log_info "Iniciando instalação do CTProxy v3.1.0 (🇧🇷)..."
 
-# ============================================
-# Mostrar portas ativas (organizado)
-# ============================================
-show_active_ports() {
-    ACTIVE=""
-    XHTTP_ACTIVE=false
+# --- Etapa 1 ---
+show_progress "Atualizando dependências..."
+apt update -y > /dev/null 2>&1
+apt install -y curl build-essential git libssl-dev pkg-config openssl > /dev/null 2>&1
 
-    for service_file in ${SYSTEMD_DIR}/proxy-*.service; do
-        if [ -f "$service_file" ]; then
-            PORT=$(basename "$service_file" .service | sed 's/proxy-//')
-            if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-                if [ "$PORT" = "443" ]; then
-                    XHTTP_ACTIVE=true
-                else
-                    ACTIVE="$ACTIVE $PORT"
-                fi
-            fi
-        fi
-    done
+# --- Etapa 2 ---
+show_progress "Verificando Rust..."
+if ! command -v cargo &> /dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1
+    source "$HOME/.cargo/env"
+else
+    source "$HOME/.cargo/env"
+fi
 
-    local ports_str=""
-    if [ -n "$ACTIVE" ]; then
-        ports_str="${YELLOW}${ACTIVE# }${NC}"
-    fi
-    if [ "$XHTTP_ACTIVE" = true ]; then
-        if [ -n "$ports_str" ]; then
-            ports_str="${ports_str} ${YELLOW}443${NC}"
-        else
-            ports_str="${YELLOW}443${NC}"
-        fi
-    fi
-    if [ -z "$ports_str" ]; then
-        ports_str="${RED}nenhuma${NC}"
-    fi
+# --- Etapa 3 ---
+show_progress "Baixando código fonte..."
+rm -rf /tmp/CTProxy_build
+git clone --branch "$REPO_BRANCH" "$REPO_URL" /tmp/CTProxy_build > /dev/null 2>&1 || log_error "Falha ao clonar repositório."
+cd /tmp/CTProxy_build || log_error "Falha ao acessar diretório."
 
-    box_line "${YELLOW}Porta(s) ativa(s):${NC} ${ports_str}"
-}
+# --- Etapa 4 ---
+show_progress "Compilando (2-5 min)..."
+cargo build --release > /tmp/ctproxy_build.log 2>&1
+if [ $? -ne 0 ]; then
+    cat /tmp/ctproxy_build.log
+    log_error "Falha na compilação. Veja logs acima."
+fi
 
-# ============================================
-# Menu Principal
-# ============================================
-show_menu() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}SDProxy Menu Free v2.3${NC}"
-    box_mid
-    show_active_ports
-    box_mid
-    box_line "${WHITE}[01]${NC} - ABRIR PORTA"
-    box_line "${WHITE}[02]${NC} - FECHAR PORTA"
-    box_line "${WHITE}[03]${NC} - REINICIAR PORTA"
-    box_line "${MAGENTA}[04]${NC} - xHTTP_SSH / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}"
-    box_line ""
-    box_line "${WHITE}[00]${NC} - SAIR"
-    box_bottom
-    echo ""
-    echo -n "Escolha uma opção: "
-}
+# --- Etapa 5 ---
+show_progress "Instalando binários..."
+mkdir -p /opt/ctproxy
 
-# ============================================
-# Abrir Porta (padrão - 80, 8080, etc)
-# ============================================
-open_port() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}Abrir Porta${NC}"
-    box_mid
-    box_line "${WHITE}Portas padrão: 80, 8080, 8880, 3128${NC}"
-    box_line "${YELLOW}Porta 443: use opção [04] xHTTP/SSL${NC}"
-    box_bottom
-    echo ""
+# Parar processos antigos para liberar os arquivos
+pkill -f "ctproxy" > /dev/null 2>&1
+pkill -f "ctproxy-xhttp" > /dev/null 2>&1
+sleep 1
 
-    read -p "Porta: " PORT
-    if [[ -z "$PORT" ]]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
+# Copiar com força (-f)
+cp -f ./target/release/ctproxy /opt/ctproxy/proxy || log_error "Falha ao copiar ctproxy. Verifique se o disco está cheio."
+chmod +x /opt/ctproxy/proxy
 
-    if [[ "$PORT" == "443" ]]; then
-        echo -e "${YELLOW}Para porta 443, use a opção [04] xHTTP_SSH / SSL TUNNEL.${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
+if [ -f ./target/release/ctproxy-xhttp ]; then
+    cp -f ./target/release/ctproxy-xhttp /opt/ctproxy/proxy-xhttp
+    chmod +x /opt/ctproxy/proxy-xhttp
+    ln -sf /opt/ctproxy/proxy-xhttp /usr/local/bin/ctproxy-xhttp
+fi
 
-    if [[ ! "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
+# Menu
+if [ -f "menu.sh" ]; then
+    cp -f menu.sh /opt/ctproxy/menu
+    chmod +x /opt/ctproxy/menu
+    ln -sf /opt/ctproxy/menu /usr/local/bin/ctproxy
+fi
 
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        echo -e "${RED}Porta ${PORT} já está em uso!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
+# Certificados
+if [ ! -f /opt/ctproxy/cert.pem ]; then
+    openssl req -x509 -newkey rsa:2048 -keyout /opt/ctproxy/key.pem -out /opt/ctproxy/cert.pem -days 3650 -nodes -subj "/CN=CTProxy" 2>/dev/null
+fi
 
-    read -p "Habilitar o HTTPS? (s/n): " HTTPS
-    HTTPS=$(echo "$HTTPS" | tr '[:upper:]' '[:lower:]')
-    echo ""
+# --- Etapa 6 ---
+show_progress "Limpando..."
+rm -rf /tmp/CTProxy_build
 
-    read -p "Status HTTP (Padrão: @SDProxy): " STATUS
-    if [[ -z "$STATUS" ]]; then
-        STATUS="@SDProxy"
-    fi
-
-    read -p "Habilitar somente SSH? (s/n): " SSH_ONLY
-    SSH_ONLY=$(echo "$SSH_ONLY" | tr '[:upper:]' '[:lower:]')
-    echo ""
-
-    mkdir -p /opt/sdproxy
-
-    if [ ! -f "$SDPROXY" ]; then
-        echo -e "${RED}SDProxy não encontrado! Execute o install.sh primeiro.${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    create_service "$PORT" "$HTTPS" "$STATUS" "$SSH_ONLY"
-
-    echo -e "${GREEN}Iniciando proxy na porta ${PORT}...${NC}"
-    systemctl daemon-reload
-    systemctl enable "proxy-${PORT}.service" 2>/dev/null
-    systemctl start "proxy-${PORT}.service" 2>/dev/null
-
-    sleep 2
-
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        box_top
-        box_line "${GREEN}Proxy iniciado na porta ${PORT}${NC}"
-        box_bottom
-    else
-        echo -e "${RED}Falha ao iniciar o proxy na porta ${PORT}!${NC}"
-        echo -e "${YELLOW}Verifique: journalctl -u proxy-${PORT}.service${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# ============================================
-# xHTTP SplitHTTP + SSL TUNNEL - Porta 443
-# ============================================
-open_xhttp() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}xHTTP_SSH / SSL TUNNEL - Porta 443${NC}"
-    box_mid
-    box_line "${WHITE}Protocolos suportados:${NC}"
-    box_line "${GREEN}• xHTTP SplitHTTP${NC} (SocksRevive)"
-    box_line "${GREEN}• SSL TUNNEL${NC} (HTTP Injector)"
-    box_line "${GREEN}• HTTP direto${NC} (qualquer client)"
-    box_bottom
-    echo ""
-
-    if systemctl is-active --quiet "proxy-443.service" 2>/dev/null; then
-        echo -e "${RED}Porta 443 já está em uso!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    mkdir -p /opt/sdproxy
-
-    if [ ! -f "$SDPROXY_XHTTP" ]; then
-        echo -e "${RED}sdproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    read -p "Status HTTP (Padrão: @SDProxy): " STATUS
-    if [[ -z "$STATUS" ]]; then
-        STATUS="@SDProxy"
-    fi
-
-    read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
-    if [[ -z "$SSH_PORT" ]]; then
-        SSH_PORT="22"
-    fi
-
-    echo -e "${GREEN}Verificando certificados TLS...${NC}"
-    if [ ! -f "/opt/sdproxy/cert.pem" ] || [ ! -f "/opt/sdproxy/key.pem" ]; then
-        echo -e "${YELLOW}Gerando certificado auto-assinado...${NC}"
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/sdproxy/key.pem \
-            -out /opt/sdproxy/cert.pem -days 365 -nodes \
-            -subj "/CN=sdproxy/O=SDProxy/C=BR" 2>/dev/null
-        echo -e "${GREEN}Certificados gerados.${NC}"
-    else
-        echo -e "${GREEN}Certificados TLS existentes.${NC}"
-    fi
-
-    echo ""
-    echo -e "${GREEN}Configuração:${NC}"
-    echo -e "  Porta: ${YELLOW}443${NC}"
-    echo -e "  TLS: ${GREEN}OBRIGATÓRIO (auto-assinado)${NC}"
-    echo -e "  SSH Backend: ${YELLOW}${SSH_PORT}${NC}"
-    echo -e "  Status: ${YELLOW}${STATUS}${NC}"
-    echo -e "  Protocolos: ${GREEN}xHTTP + SSL Tunnel + HTTP${NC}"
-    echo ""
-
-    create_xhttp_service "443" "$STATUS" "$SSH_PORT"
-
-    echo -e "${GREEN}Iniciando xHTTP_SSH / SSL TUNNEL na porta 443...${NC}"
-    systemctl daemon-reload
-    systemctl enable "proxy-443.service" 2>/dev/null
-    systemctl start "proxy-443.service" 2>/dev/null
-
-    sleep 3
-
-    if systemctl is-active --quiet "proxy-443.service" 2>/dev/null; then
-        box_top
-        box_line "${GREEN}${BOLD}ATIVO NA PORTA 443${NC}"
-        box_line "${GREEN}xHTTP_SSH + SSL TUNNEL${NC}"
-        box_bottom
-        echo ""
-        box_top
-        box_line "${YELLOW}${BOLD}SocksRevive (xHTTP SplitHTTP):${NC}"
-        box_line "  Server: IP deste servidor"
-        box_line "  Port: 443"
-        box_line "  SNI: qualquer domínio (trust-all)"
-        box_line "  XHTTP Path: /ssh"
-        box_line "  XHTTP TLS: HABILITADO"
-        box_mid
-        box_line "${YELLOW}${BOLD}HTTP Injector (SSL Tunnel):${NC}"
-        box_line "  Server: IP deste servidor"
-        box_line "  Port: 443"
-        box_line "  SSL Proxy: HABILITADO"
-        box_line "  Payload: default"
-        box_bottom
-        echo ""
-        echo -e "${YELLOW}Logs: journalctl -u proxy-443.service -f${NC}"
-    else
-        echo -e "${RED}Falha ao iniciar na porta 443!${NC}"
-        echo -e "${YELLOW}Logs: journalctl -u proxy-443.service -f${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# ============================================
-# Criar serviço padrão
-# ============================================
-create_service() {
-    local PORT=$1
-    local HTTPS=$2
-    local STATUS=$3
-    local SSH_ONLY=$4
-    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
-
-    EXTRA_ARGS="-p ${PORT}"
-
-    if [[ -n "$STATUS" ]]; then
-        EXTRA_ARGS="${EXTRA_ARGS} -s ${STATUS}"
-    fi
-
-    if [[ "$HTTPS" == "s" ]]; then
-        EXTRA_ARGS="${EXTRA_ARGS} -t"
-    fi
-
-    if [[ "$SSH_ONLY" == "s" ]]; then
-        EXTRA_ARGS="${EXTRA_ARGS} -ssh"
-    fi
-
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=SDProxy - Porta ${PORT}
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${SDPROXY} ${EXTRA_ARGS}
-Restart=on-failure
-RestartSec=5
-User=root
-WorkingDirectory=/opt/sdproxy
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-# ============================================
-# Criar serviço xHTTP + SSL Tunnel (porta 443)
-# ============================================
-create_xhttp_service() {
-    local PORT=$1
-    local STATUS=$2
-    local SSH_PORT=$3
-    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
-
-    EXTRA_ARGS="-p ${PORT} -s ${STATUS} --ssh-port ${SSH_PORT}"
-
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=SDProxy xHTTP + SSL Tunnel - Porta ${PORT}
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${SDPROXY_XHTTP} ${EXTRA_ARGS}
-Restart=on-failure
-RestartSec=5
-User=root
-WorkingDirectory=/opt/sdproxy
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-# ============================================
-# Fechar Porta
-# ============================================
-close_port() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}Fechar Porta${NC}"
-    box_bottom
-    echo ""
-
-    show_active_ports_boxed
-
-    read -p "Porta: " PORT
-    if [[ -z "$PORT" ]]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        systemctl stop "proxy-${PORT}.service"
-        systemctl disable "proxy-${PORT}.service" 2>/dev/null
-        rm -f "${SYSTEMD_DIR}/proxy-${PORT}.service"
-        systemctl daemon-reload
-        echo -e "${GREEN}Porta ${PORT} fechada com sucesso!${NC}"
-    else
-        echo -e "${RED}Porta ${PORT} não está ativa!${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# ============================================
-# Reiniciar Porta
-# ============================================
-restart_port() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}Reiniciar Porta${NC}"
-    box_bottom
-    echo ""
-
-    show_active_ports_boxed
-
-    read -p "Porta: " PORT
-    if [[ -z "$PORT" ]]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        echo -e "${YELLOW}Reiniciando proxy na porta ${PORT}...${NC}"
-        systemctl restart "proxy-${PORT}.service"
-        sleep 2
-
-        if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-            echo -e "${GREEN}Proxy reiniciado na porta ${PORT}!${NC}"
-        else
-            echo -e "${RED}Falha ao reiniciar proxy na porta ${PORT}!${NC}"
-        fi
-    else
-        echo -e "${RED}Porta ${PORT} não está ativa!${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# Caixa de portas ativas usada em fechar/reiniciar
-show_active_ports_boxed() {
-    box_top
-    show_active_ports
-    box_bottom
-    echo ""
-}
-
-# ============================================
-# Loop Principal
-# ============================================
-
-while true; do
-    show_menu
-    read OPTION
-    case $OPTION in
-        01|1) open_port ;;
-        02|2) close_port ;;
-        03|3) restart_port ;;
-        04|4) open_xhttp ;;
-        00|0) echo -e "${GREEN}Saindo...${NC}"; exit 0 ;;
-        *) echo -e "${RED}Opção inválida!${NC}"; sleep 1 ;;
-    esac
-done
+# --- Etapa 7 ---
+log_success "Instalação concluída com sucesso!"
+echo -e "Use o comando ${YELLOW}ctproxy${NC} para abrir o menu."
+echo -e "--------------------------------------------------------------"
