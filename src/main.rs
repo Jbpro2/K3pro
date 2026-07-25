@@ -150,7 +150,7 @@ fn get_status() -> String {
             return args[i + 1].clone();
         }
     }
-    "@SDProxy".to_string()
+    "@LKProxy".to_string()
 }
 
 fn has_arg(arg: &str) -> bool {

@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # ============================================
-# SDProxy Menu - Free v2.3
+# LKProxy Menu - Free v2.3
 # ============================================
 
-SDPROXY="/opt/sdproxy/proxy"
-SDPROXY_XHTTP="/opt/sdproxy/proxy-xhttp"
+SDPROXY="/opt/lkproxy/proxy"
+SDPROXY_XHTTP="/opt/lkproxy/proxy-xhttp"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Cores
@@ -121,7 +121,7 @@ show_menu() {
     show_banner
     echo ""
     box_top
-    box_line "${WHITE}${BOLD}SDProxy Menu Free v2.3${NC}"
+    box_line "${WHITE}${BOLD}LKProxy Menu Free v2.3${NC}"
     box_mid
     show_active_ports
     box_mid
@@ -180,19 +180,19 @@ open_port() {
     HTTPS=$(echo "$HTTPS" | tr '[:upper:]' '[:lower:]')
     echo ""
 
-    read -p "Status HTTP (Padrão: @SDProxy): " STATUS
+    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
     if [[ -z "$STATUS" ]]; then
-        STATUS="@SDProxy"
+        STATUS="@LKProxy"
     fi
 
     read -p "Habilitar somente SSH? (s/n): " SSH_ONLY
     SSH_ONLY=$(echo "$SSH_ONLY" | tr '[:upper:]' '[:lower:]')
     echo ""
 
-    mkdir -p /opt/sdproxy
+    mkdir -p /opt/lkproxy
 
     if [ ! -f "$SDPROXY" ]; then
-        echo -e "${RED}SDProxy não encontrado! Execute o install.sh primeiro.${NC}"
+        echo -e "${RED}LKProxy não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
     fi
@@ -242,17 +242,17 @@ open_xhttp() {
         return
     fi
 
-    mkdir -p /opt/sdproxy
+    mkdir -p /opt/lkproxy
 
     if [ ! -f "$SDPROXY_XHTTP" ]; then
-        echo -e "${RED}sdproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
+        echo -e "${RED}lkproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
     fi
 
-    read -p "Status HTTP (Padrão: @SDProxy): " STATUS
+    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
     if [[ -z "$STATUS" ]]; then
-        STATUS="@SDProxy"
+        STATUS="@LKProxy"
     fi
 
     read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
@@ -261,11 +261,11 @@ open_xhttp() {
     fi
 
     echo -e "${GREEN}Verificando certificados TLS...${NC}"
-    if [ ! -f "/opt/sdproxy/cert.pem" ] || [ ! -f "/opt/sdproxy/key.pem" ]; then
+    if [ ! -f "/opt/lkproxy/cert.pem" ] || [ ! -f "/opt/lkproxy/key.pem" ]; then
         echo -e "${YELLOW}Gerando certificado auto-assinado...${NC}"
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/sdproxy/key.pem \
-            -out /opt/sdproxy/cert.pem -days 365 -nodes \
-            -subj "/CN=sdproxy/O=SDProxy/C=BR" 2>/dev/null
+        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem \
+            -out /opt/lkproxy/cert.pem -days 365 -nodes \
+            -subj "/CN=lkproxy/O=LKProxy/C=BR" 2>/dev/null
         echo -e "${GREEN}Certificados gerados.${NC}"
     else
         echo -e "${GREEN}Certificados TLS existentes.${NC}"
@@ -346,7 +346,7 @@ create_service() {
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=SDProxy - Porta ${PORT}
+Description=LKProxy - Porta ${PORT}
 After=network.target
 
 [Service]
@@ -355,7 +355,7 @@ ExecStart=${SDPROXY} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/sdproxy
+WorkingDirectory=/opt/lkproxy
 
 [Install]
 WantedBy=multi-user.target
@@ -375,7 +375,7 @@ create_xhttp_service() {
 
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=SDProxy xHTTP + SSL Tunnel - Porta ${PORT}
+Description=LKProxy xHTTP + SSL Tunnel - Porta ${PORT}
 After=network.target
 
 [Service]
@@ -384,7 +384,7 @@ ExecStart=${SDPROXY_XHTTP} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/sdproxy
+WorkingDirectory=/opt/lkproxy
 
 [Install]
 WantedBy=multi-user.target

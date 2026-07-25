@@ -1,5 +1,5 @@
 [package]
-name = "sdproxy"
+name = "lkproxy"
 version = "2.5.0"
 edition = "2021"
 
@@ -20,9 +20,9 @@ rustls-native-certs = "0.6"
 futures-util = "0.3"
 
 [[bin]]
-name = "sdproxy"
+name = "lkproxy"
 path = "src/main.rs"
 
 [[bin]]
-name = "sdproxy-xhttp"
+name = "lkproxy-xhttp"
 path = "src/bin/xhttp.rs"

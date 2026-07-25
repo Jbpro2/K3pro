@@ -45,7 +45,7 @@ O cliente SocksRevive usa **SplitHTTP** (também conhecido como XHTTP) que opera
 3. Aceitar POSTs sequenciados e encaminhar para backend SSH/VPN
 4. Bidirecional: dados do backend → GET response; dados do cliente → POST body
 
-### O que o SDProxy atual NÃO faz
+### O que o LKProxy atual NÃO faz
 - Não serve GET como streaming (fecha rápido demais)
 - Não aceita POSTs com sequence numbers
 - Não faz proxy HTTP/2

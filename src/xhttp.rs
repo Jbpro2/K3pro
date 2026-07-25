@@ -74,8 +74,8 @@ async fn handle_xhttp_client(stream: TcpStream, status: &str, ssh_port: u16) -> 
 }
 
 async fn handle_tls_dual(stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
-    let cert_path = "/opt/sdproxy/cert.pem";
-    let key_path = "/opt/sdproxy/key.pem";
+    let cert_path = "/opt/lkproxy/cert.pem";
+    let key_path = "/opt/lkproxy/key.pem";
 
     let config = build_tls_config(cert_path, key_path)?;
     let acceptor = TlsAcceptor::from(Arc::new(config));
@@ -264,5 +264,5 @@ fn build_tls_config(cp: &str, kp: &str) -> Result<rustls::ServerConfig, XhttpErr
 
 fn get_port() -> u16 { std::env::args().enumerate().find(|(_, a)| a == "--port" || a == "-p").and_then(|(i, _)| std::env::args().nth(i+1)).and_then(|a| a.parse().ok()).unwrap_or(443) }
 fn get_ssh_port() -> u16 { std::env::args().enumerate().find(|(_, a)| a == "--ssh-port").and_then(|(i, _)| std::env::args().nth(i+1)).and_then(|a| a.parse().ok()).unwrap_or(22) }
-fn get_status() -> String { std::env::args().enumerate().find(|(_, a)| a == "--status" || a == "-s").and_then(|(i, _)| std::env::args().nth(i+1)).unwrap_or("@SDProxy".to_string()) }
+fn get_status() -> String { std::env::args().enumerate().find(|(_, a)| a == "--status" || a == "-s").and_then(|(i, _)| std::env::args().nth(i+1)).unwrap_or("@LKProxy".to_string()) }
 fn generate_session_id() -> String { format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()) }
