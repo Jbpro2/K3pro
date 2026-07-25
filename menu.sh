@@ -19,21 +19,16 @@ MAGENTA='\033[0;35m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-BOX_WIDTH=46   # largura interna da caixa (entre as bordas ║ ║)
+BOX_WIDTH=46   
 
-# ============================================
-# Helpers para caixas alinhadas
-# ============================================
-
-# Remove códigos de cor ANSI para calcular o comprimento visível
 strip_len() {
     local clean
     clean=$(echo -ne "$1" | sed -r 's/\x1B\[[0-9;]*[mK]//g')
     echo -n "${#clean}"
 }
 
-# Imprime uma linha dentro da caixa, com padding correto
-# Uso: box_line "texto com cores"
+NBSP=$'\xc2\xa0'
+
 box_line() {
     local content="$1"
     local visible_len
@@ -42,7 +37,10 @@ box_line() {
     [ $pad -lt 0 ] && pad=0
     echo -ne "${CYAN}║${NC} "
     echo -ne "${content}"
-    printf '%*s' "$pad" ""
+    local i
+    for ((i=0; i<pad; i++)); do
+        printf '%s' "$NBSP"
+    done
     echo -e "${CYAN}║${NC}"
 }
 
