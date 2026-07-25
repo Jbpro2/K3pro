@@ -14,7 +14,7 @@ async fn main() -> Result<(), Error> {
     let use_quic = has_arg("-q");
     let quic_port = get_quic_port();
 
-    println!("[BDRProxy] Multi-protocolo v2.5.0");
+    println!("[LKProxy] Multi-protocolo v2.5.0");
     println!("[TCP] Porta: {}", port);
     
     if use_udp {
