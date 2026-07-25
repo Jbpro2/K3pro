@@ -21,11 +21,7 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 BOX_WIDTH=46 
-# ============================================
-# Helpers para caixas alinhadas
-# ============================================
 
-# Remove códigos de cor ANSI para calcular o comprimento visível
 strip_len() {
     local clean
     clean=$(echo -ne "$1" | sed -r 's/\x1B\[[0-9;]*[mK]//g')
