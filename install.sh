@@ -47,7 +47,7 @@ echo -e "${BLUE}${BOLD} ╚════██║██║  ██║██╔═
 echo -e "${BLUE}${BOLD} ███████║██████╔╝██║     ██║  ██║╚██████╔╝██╔╝ ██╗   ██║   ${NC}"
 echo -e "${BLUE}${BOLD} ╚══════╝╚═════╝ ╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ${NC}"
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
-log_info "Iniciando instalação do SDProxy v3.1.0 (DTunnel Handshake Fix)..."
+log_info "Iniciando instalação do SDProxy v3.1.0 (🇧🇷)..."
 
 # --- Etapa 1 ---
 show_progress "Atualizando dependências..."
