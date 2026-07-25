@@ -17,8 +17,8 @@ Proxy multi-protocolo em Rust com suporte exclusivo para o protocolo xHTTP (Spli
 
 ```bash
 # Clonar ou copiar os arquivos para o servidor
-git clone https://github.com/PedroJbk/CTProxy.git
-cd SDProxy
+git clone https://github.com/MTSPRO2/CTProxy.git
+cd CTProxy
 
 # Substituir os arquivos pelo v2.0
 cp menu.sh menu_original.sh.backup
