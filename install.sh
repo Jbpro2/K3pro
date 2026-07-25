@@ -1,7 +1,7 @@
 #!/bin/bash
 # SDProxy Installer - Version v3.1.0
 
-REPO_URL="https://github.com/PedroJbk/BDRProxy.git"
+REPO_URL="https://github.com/PedroJbk/CTProxy.git"
 REPO_BRANCH="main"
 CMD_NAME="sdproxy"
 TOTAL_STEPS=7
