@@ -20,7 +20,7 @@ PURPLE='\033[0;35m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-BOX_WIDTH=46 
+BOX_WIDTH=46   
 
 strip_len() {
     local clean
