@@ -28,7 +28,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP v3.3.5 (DTUNNEL + SocksRevive Support)");
+    println!("[BDRProxy] xHTTP v3.3.6 (DTUNNEL + SocksRevive High-Compatibility)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
@@ -40,9 +40,7 @@ async fn main() -> Result<(), XhttpError> {
                 let _ = client_stream.set_nodelay(true);
                 let status = status_arc.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_xhttp_client(client_stream, &status, ssh_port).await {
-                        // Silenciar erros comuns de desconexão para logs mais limpos
-                    }
+                    let _ = handle_xhttp_client(client_stream, &status, ssh_port).await;
                 });
             }
             Err(e) => {
@@ -58,14 +56,14 @@ async fn handle_xhttp_client(
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
     let mut peek_buf = [0u8; 3];
-    let peek_result = timeout(Duration::from_millis(500), stream.peek(&mut peek_buf)).await;
+    // Timeouts aumentados para redes móveis instáveis
+    let peek_result = timeout(Duration::from_secs(3), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
         _ => 0,
     };
 
     if bytes_peeked == 0 {
-        // Se não houver dados imediatos, tenta SSH direto (pode ser um probe ou SSH puro)
         return handle_ssh_direct(stream, ssh_port).await;
     }
     
@@ -94,14 +92,15 @@ async fn handle_tls_dual(
     let key_path = "/opt/lkproxy/key.pem";
 
     let mut config = build_tls_config(cert_path, key_path)?;
-    // DTUNNEL prefere http/1.1, SocksRevive prefere h2
-    config.alpn_protocols = vec![b"http/1.1".to_vec(), b"h2".to_vec()];
+    // IMPORTANTE: Removemos 'h2' para forçar 'http/1.1' em ambos. 
+    // Isso resolve o travamento "XHTTP proto=h2" no SocksRevive, pois o servidor é otimizado para HTTP/1.1 Split.
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| Box::new(e) as XhttpError)?;
 
     let mut buf = vec![0u8; 4096];
-    let n = match timeout(Duration::from_millis(1000), tls_stream.read(&mut buf)).await {
+    let n = match timeout(Duration::from_secs(5), tls_stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => n,
         _ => {
             return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
@@ -111,7 +110,7 @@ async fn handle_tls_dual(
     let data = &buf[..n];
     let http_str = String::from_utf8_lossy(data);
     
-    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") {
+    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") || http_str.contains("/split/") {
         if let Some((method, path)) = parse_http_request(&http_str) {
             match method.as_str() {
                 "GET" => return handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
@@ -135,7 +134,7 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
     let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
     let http_str = String::from_utf8_lossy(&buf[..n]);
     
-    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") {
+    if http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/") || http_str.contains("/split/") {
         if let Some((method, path)) = parse_http_request(&http_str) {
             match method.as_str() {
                 "GET" => return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
@@ -180,10 +179,21 @@ async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpSt
 
 async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let (sid, _) = extract_path_info(path);
+    
+    // Limpeza agressiva de sessão anterior para reconexão rápida
+    {
+        let mut sessions = SESSIONS.lock().await;
+        if let Some(old) = sessions.get(&sid) {
+            let mut a = old.active.write().await;
+            *a = false;
+        }
+        sessions.remove(&sid);
+    }
+
     let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut sr, mut sw) = ssh.into_split();
-    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(2048); // Aumentado buffer
-    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(2048); // Aumentado buffer
+    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(4096); 
+    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(4096); 
     let act = Arc::new(RwLock::new(true));
     
     SESSIONS.lock().await.insert(sid.clone(), XhttpSession { post_tx: ptx, get_tx: gtx.clone(), active: act.clone() });
@@ -201,7 +211,7 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
     let gtx_c = gtx.clone();
     let act_c2 = act.clone();
     tokio::spawn(async move { 
-        let mut b = vec![0u8; 32768]; // Buffer maior para throughput
+        let mut b = vec![0u8; 32768]; 
         while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { 
             if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } 
             if !*act_c2.read().await { break; }
@@ -210,7 +220,7 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         *a = false;
     });
 
-    // Headers anti-cache e keep-alive para DTUNNEL
+    // Headers otimizados para DTUNNEL reconhecer o download iniciado
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
         Content-Type: application/octet-stream\r\n\
@@ -225,6 +235,7 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
     );
     
     tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?; // Flush imediato para o DTUNNEL
     
     while let Some(d) = grx.recv().await {
         if !*act.read().await { break; }
@@ -242,10 +253,20 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
 
 async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let (sid, _) = extract_path_info(path);
+    
+    {
+        let mut sessions = SESSIONS.lock().await;
+        if let Some(old) = sessions.get(&sid) {
+            let mut a = old.active.write().await;
+            *a = false;
+        }
+        sessions.remove(&sid);
+    }
+
     let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut sr, mut sw) = ssh.into_split();
-    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(2048);
-    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(2048);
+    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(4096);
+    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(4096);
     let act = Arc::new(RwLock::new(true));
 
     SESSIONS.lock().await.insert(sid.clone(), XhttpSession { post_tx: ptx, get_tx: gtx.clone(), active: act.clone() });
@@ -286,6 +307,7 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     );
     
     stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    stream.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
     
     while let Some(d) = grx.recv().await {
         if !*act.read().await { break; }
@@ -380,8 +402,7 @@ fn build_tls_config(cp: &str, kp: &str) -> Result<rustls::ServerConfig, XhttpErr
         .with_single_cert(certs, keys.into_iter().next().unwrap())
         .map_err(|e| Box::new(e) as XhttpError)?;
     
-    // Suporte a TLSv1.2 e TLSv1.3
-    c.alpn_protocols = vec![b"http/1.1".to_vec(), b"h2".to_vec()];
+    c.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(c)
 }
 
