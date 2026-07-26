@@ -4,8 +4,9 @@
 # LKProxy Menu - Free v2.3
 # ============================================
 
-SDPROXY="/opt/lkproxy/proxy"
-SDPROXY_XHTTP="/opt/lkproxy/proxy-xhttp"
+LKPROXY="/opt/lkproxy/proxy"
+LKPROXY_XHTTP="/opt/lkproxy/proxy-xhttp"
+LKPROXY_INTEGRATED="/opt/lkproxy/proxy-integrated"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Cores
@@ -62,9 +63,6 @@ box_bottom() {
     printf "╝${NC}\n"
 }
 
-# ============================================
-# Banner SDPROXY
-# ============================================
 show_banner() {
 echo -e "${PURPLE}${BOLD} ██╗     ██╗  ██╗██████╗ ██████╗  ██████╗ ██╗  ██╗██╗   ██╗${NC}"
 echo -e "${PURPLE}${BOLD} ██║     ██║ ██╔╝██╔══██╗██╔══██╗██╔═══██╗╚██╗██╔╝╚██╗ ██╔╝${NC}"
@@ -75,21 +73,21 @@ echo -e "${BLUE}${BOLD} ╚══════╝╚═╝  ╚═╝╚═╝   
 echo -e "${BLUE}${BOLD}--------------------------------------------------------------${NC}"
 }
 
-# ============================================
-# Mostrar portas ativas (organizado)
-# ============================================
 show_active_ports() {
     ACTIVE=""
     XHTTP_ACTIVE=false
+    INTEGRATED_ACTIVE=false
 
     for service_file in ${SYSTEMD_DIR}/proxy-*.service; do
         if [ -f "$service_file" ]; then
-            PORT=$(basename "$service_file" .service | sed 's/proxy-//')
-            if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-                if [ "$PORT" = "443" ]; then
+            NAME=$(basename "$service_file" .service | sed 's/proxy-//')
+            if systemctl is-active --quiet "proxy-${NAME}.service" 2>/dev/null; then
+                if [ "$NAME" = "443" ]; then
                     XHTTP_ACTIVE=true
+                elif [ "$NAME" = "integrated" ]; then
+                    INTEGRATED_ACTIVE=true
                 else
-                    ACTIVE="$ACTIVE $PORT"
+                    ACTIVE="$ACTIVE $NAME"
                 fi
             fi
         fi
@@ -100,11 +98,10 @@ show_active_ports() {
         ports_str="${YELLOW}${ACTIVE# }${NC}"
     fi
     if [ "$XHTTP_ACTIVE" = true ]; then
-        if [ -n "$ports_str" ]; then
-            ports_str="${ports_str} ${YELLOW}443${NC}"
-        else
-            ports_str="${YELLOW}443${NC}"
-        fi
+        ports_str="${ports_str}${ports_str:+ }${YELLOW}443${NC}"
+    fi
+    if [ "$INTEGRATED_ACTIVE" = true ]; then
+        ports_str="${ports_str}${ports_str:+ }${GREEN}INTEGRADO${NC}"
     fi
     if [ -z "$ports_str" ]; then
         ports_str="${RED}nenhuma${NC}"
@@ -113,9 +110,195 @@ show_active_ports() {
     box_line "${YELLOW}Porta(s) ativa(s):${NC} ${ports_str}"
 }
 
-# ============================================
-# Menu Principal
-# ============================================
+create_service() {
+    local PORT=$1
+    local HTTPS=$2
+    local STATUS=$3
+    local SSH_ONLY=$4
+    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
+    EXTRA_ARGS="-p ${PORT}"
+    [[ -n "$STATUS" ]] && EXTRA_ARGS="${EXTRA_ARGS} -s ${STATUS}"
+    [[ "$HTTPS" == "s" ]] && EXTRA_ARGS="${EXTRA_ARGS} -t"
+    [[ "$SSH_ONLY" == "s" ]] && EXTRA_ARGS="${EXTRA_ARGS} -ssh"
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=LKProxy - Porta ${PORT}
+After=network.target
+[Service]
+Type=simple
+ExecStart=${LKPROXY} ${EXTRA_ARGS}
+Restart=on-failure
+RestartSec=5
+User=root
+WorkingDirectory=/opt/lkproxy
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+create_xhttp_service() {
+    local PORT=$1
+    local STATUS=$2
+    local SSH_PORT=$3
+    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
+    EXTRA_ARGS="-p ${PORT} -s ${STATUS} --ssh-port ${SSH_PORT}"
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=LKProxy xHTTP + SSL Tunnel - Porta ${PORT}
+After=network.target
+[Service]
+Type=simple
+ExecStart=${LKPROXY_XHTTP} ${EXTRA_ARGS}
+Restart=on-failure
+RestartSec=5
+User=root
+WorkingDirectory=/opt/lkproxy
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+open_port() {
+    clear
+    show_banner
+    echo ""
+    box_top
+    box_line "${WHITE}${BOLD}Abrir Porta${NC}"
+    box_mid
+    box_line "${WHITE}Portas padrão: 80, 8080, 8880, 3128${NC}"
+    box_line "${YELLOW}Porta 443: use opção [04] xHTTP/SSL${NC}"
+    box_bottom
+    echo ""
+    read -p "Porta: " PORT
+    [[ -z "$PORT" ]] && return
+    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
+        echo -e "${RED}Porta ${PORT} já está em uso!${NC}"; sleep 2; return
+    fi
+    read -p "Habilitar o HTTPS? (s/n): " HTTPS
+    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
+    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
+    read -p "Habilitar somente SSH? (s/n): " SSH_ONLY
+    mkdir -p /opt/lkproxy
+    create_service "$PORT" "$HTTPS" "$STATUS" "$SSH_ONLY"
+    systemctl daemon-reload
+    systemctl enable "proxy-${PORT}.service" 2>/dev/null
+    systemctl start "proxy-${PORT}.service" 2>/dev/null
+    sleep 2
+    read -p "Enter pra continuar..."
+}
+
+open_xhttp() {
+    clear
+    show_banner
+    echo ""
+    box_top
+    box_line "${WHITE}${BOLD}xHTTP_SSH / SSL TUNNEL - Porta 443${NC}"
+    box_bottom
+    echo ""
+    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
+    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
+    read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
+    [[ -z "$SSH_PORT" ]] && SSH_PORT="22"
+    mkdir -p /opt/lkproxy
+    if [ ! -f "/opt/lkproxy/cert.pem" ]; then
+        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem -out /opt/lkproxy/cert.pem -days 365 -nodes -subj "/CN=lkproxy" 2>/dev/null
+    fi
+    create_xhttp_service "443" "$STATUS" "$SSH_PORT"
+    systemctl daemon-reload
+    systemctl enable "proxy-443.service" 2>/dev/null
+    systemctl start "proxy-443.service" 2>/dev/null
+    sleep 2
+    read -p "Enter pra continuar..."
+}
+
+open_integrated() {
+    clear
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    echo -e "${WHITE}|  CONFIGURACOES ATUAIS                                  |${NC}"
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    echo -e "${WHITE}|  Porta: 8000                                           |${NC}"
+    echo -e "${WHITE}|  Sub-rede: 10.10.0.0/16                                |${NC}"
+    echo -e "${WHITE}|  Interface TUN: tun0                                   |${NC}"
+    echo -e "${WHITE}|  Protocolos: tcp:8000,udp:8000,quic:8001               |${NC}"
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    read -p "Porta (Enter para manter [8000]): " PORT
+    [[ -z "$PORT" ]] && PORT="8000"
+    read -p "Sub-rede CIDR (Enter para manter [10.10.0.0/16]): " SUBNET
+    [[ -z "$SUBNET" ]] && SUBNET="10.10.0.0/16"
+    read -p "Interface TUN (Enter para manter [tun0]): " TUN
+    [[ -z "$TUN" ]] && TUN="tun0"
+    read -p "Deseja ativar UDP na mesma porta? (s/N) " ENABLE_UDP
+    UDP_ARG=""
+    [[ "$ENABLE_UDP" == "s" || "$ENABLE_UDP" == "S" ]] && UDP_ARG="--udp"
+    read -p "Deseja ativar QUIC? (s/N) " ENABLE_QUIC
+    QUIC_ARG=""
+    if [[ "$ENABLE_QUIC" == "s" || "$ENABLE_QUIC" == "S" ]]; then
+        read -p "Porta para QUIC (Enter para 8001): " QPORT
+        [[ -z "$QPORT" ]] && QPORT="8001"
+        QUIC_ARG="--quic --quic-port $QPORT"
+    fi
+    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
+    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
+    mkdir -p /opt/lkproxy
+    if [ ! -f "/opt/lkproxy/cert.pem" ]; then
+        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem -out /opt/lkproxy/cert.pem -days 365 -nodes -subj "/CN=lkproxy" 2>/dev/null
+    fi
+    cat > "${SYSTEMD_DIR}/proxy-integrated.service" << EOF
+[Unit]
+Description=LKProxy Integrated
+After=network.target
+[Service]
+Type=simple
+ExecStart=${LKPROXY_INTEGRATED} -p ${PORT} -s ${STATUS} --tun ${TUN} --subnet ${SUBNET} ${UDP_ARG} ${QUIC_ARG}
+Restart=on-failure
+RestartSec=5
+User=root
+WorkingDirectory=/opt/lkproxy
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable proxy-integrated.service 2>/dev/null
+    systemctl start proxy-integrated.service 2>/dev/null
+    sleep 2
+    echo "Servidor protocolo iniciado com sucesso!"
+    read -p "Pressione Enter para continuar..."
+}
+
+restart_port() {
+    clear
+    show_banner
+    echo ""
+    box_top
+    show_active_ports
+    box_bottom
+    echo ""
+    read -p "Porta (ou integrated): " PORT
+    [[ -z "$PORT" ]] && return
+    systemctl restart "proxy-${PORT}.service" 2>/dev/null
+    echo -e "${GREEN}Porta ${PORT} reiniciada!${NC}"
+    sleep 2
+}
+
+close_port() {
+    clear
+    show_banner
+    echo ""
+    box_top
+    show_active_ports
+    box_bottom
+    echo ""
+    read -p "Porta (ou 'integrated'): " PORT
+    [[ -z "$PORT" ]] && return
+    systemctl stop "proxy-${PORT}.service" 2>/dev/null
+    systemctl disable "proxy-${PORT}.service" 2>/dev/null
+    rm -f "${SYSTEMD_DIR}/proxy-${PORT}.service"
+    systemctl daemon-reload
+    echo -e "${GREEN}Porta ${PORT} fechada!${NC}"
+    sleep 2
+}
+
 show_menu() {
     clear
     show_banner
@@ -137,347 +320,6 @@ show_menu() {
     echo -n "Escolha uma opção: "
 }
 
-# ============================================
-# Abrir Porta (padrão - 80, 8080, etc)
-# ============================================
-open_port() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}Abrir Porta${NC}"
-    box_mid
-    box_line "${WHITE}Portas padrão: 80, 8080, 8880, 3128${NC}"
-    box_line "${YELLOW}Porta 443: use opção [04] xHTTP/SSL${NC}"
-    box_bottom
-    echo ""
-
-    read -p "Porta: " PORT
-    if [[ -z "$PORT" ]]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    if [[ "$PORT" == "443" ]]; then
-        echo -e "${YELLOW}Para porta 443, use a opção [04] xHTTP_SSH / SSL TUNNEL.${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    if [[ ! "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        echo -e "${RED}Porta ${PORT} já está em uso!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    read -p "Habilitar o HTTPS? (s/n): " HTTPS
-    HTTPS=$(echo "$HTTPS" | tr '[:upper:]' '[:lower:]')
-    echo ""
-
-    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
-    if [[ -z "$STATUS" ]]; then
-        STATUS="@LKProxy"
-    fi
-
-    read -p "Habilitar somente SSH? (s/n): " SSH_ONLY
-    SSH_ONLY=$(echo "$SSH_ONLY" | tr '[:upper:]' '[:lower:]')
-    echo ""
-
-    mkdir -p /opt/lkproxy
-
-    if [ ! -f "$LKPROXY" ]; then
-        echo -e "${RED}LKProxy não encontrado! Execute o install.sh primeiro.${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    create_service "$PORT" "$HTTPS" "$STATUS" "$SSH_ONLY"
-
-    echo -e "${GREEN}Iniciando proxy na porta ${PORT}...${NC}"
-    systemctl daemon-reload
-    systemctl enable "proxy-${PORT}.service" 2>/dev/null
-    systemctl start "proxy-${PORT}.service" 2>/dev/null
-
-    sleep 2
-
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        box_top
-        box_line "${GREEN}Proxy iniciado na porta ${PORT}${NC}"
-        box_bottom
-    else
-        echo -e "${RED}Falha ao iniciar o proxy na porta ${PORT}!${NC}"
-        echo -e "${YELLOW}Verifique: journalctl -u proxy-${PORT}.service${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# ============================================
-# xHTTP SplitHTTP + SSL TUNNEL - Porta 443
-# ============================================
-open_xhttp() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}xHTTP_SSH / SSL TUNNEL - Porta 443${NC}"
-    box_mid
-    box_line "${WHITE}Protocolos suportados:${NC}"
-    box_line "${GREEN}• xHTTP SplitHTTP${NC} (SocksRevive)"
-    box_line "${GREEN}• SSL TUNNEL${NC} (HTTP Injector)"
-    box_line "${GREEN}• HTTP direto${NC} (qualquer client)"
-    box_bottom
-    echo ""
-
-    if systemctl is-active --quiet "proxy-443.service" 2>/dev/null; then
-        echo -e "${RED}Porta 443 já está em uso!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    mkdir -p /opt/lkproxy
-
-    if [ ! -f "$LKPROXY_XHTTP" ]; then
-        echo -e "${RED}lkproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
-    if [[ -z "$STATUS" ]]; then
-        STATUS="@LKProxy"
-    fi
-
-    read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
-    if [[ -z "$SSH_PORT" ]]; then
-        SSH_PORT="22"
-    fi
-
-    echo -e "${GREEN}Verificando certificados TLS...${NC}"
-    if [ ! -f "/opt/lkproxy/cert.pem" ] || [ ! -f "/opt/lkproxy/key.pem" ]; then
-        echo -e "${YELLOW}Gerando certificado auto-assinado...${NC}"
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem \
-            -out /opt/lkproxy/cert.pem -days 365 -nodes \
-            -subj "/CN=lkproxy/O=LKProxy/C=BR" 2>/dev/null
-        echo -e "${GREEN}Certificados gerados.${NC}"
-    else
-        echo -e "${GREEN}Certificados TLS existentes.${NC}"
-    fi
-
-    echo ""
-    echo -e "${GREEN}Configuração:${NC}"
-    echo -e "  Porta: ${YELLOW}443${NC}"
-    echo -e "  TLS: ${GREEN}OBRIGATÓRIO (auto-assinado)${NC}"
-    echo -e "  SSH Backend: ${YELLOW}${SSH_PORT}${NC}"
-    echo -e "  Status: ${YELLOW}${STATUS}${NC}"
-    echo -e "  Protocolos: ${GREEN}xHTTP + SSL Tunnel + HTTP${NC}"
-    echo ""
-
-    create_xhttp_service "443" "$STATUS" "$SSH_PORT"
-
-    echo -e "${GREEN}Iniciando xHTTP_SSH / SSL TUNNEL na porta 443...${NC}"
-    systemctl daemon-reload
-    systemctl enable "proxy-443.service" 2>/dev/null
-    systemctl start "proxy-443.service" 2>/dev/null
-
-    sleep 3
-
-    if systemctl is-active --quiet "proxy-443.service" 2>/dev/null; then
-        box_top
-        box_line "${GREEN}${BOLD}ATIVO NA PORTA 443${NC}"
-        box_line "${GREEN}xHTTP_SSH + SSL TUNNEL${NC}"
-        box_bottom
-        echo ""
-        box_top
-        box_line "${YELLOW}${BOLD}SocksRevive (xHTTP SplitHTTP):${NC}"
-        box_line "  Server: IP deste servidor"
-        box_line "  Port: 443"
-        box_line "  SNI: qualquer domínio (trust-all)"
-        box_line "  XHTTP Path: /ssh"
-        box_line "  XHTTP TLS: HABILITADO"
-        box_mid
-        box_line "${YELLOW}${BOLD}HTTP Injector (SSL Tunnel):${NC}"
-        box_line "  Server: IP deste servidor"
-        box_line "  Port: 443"
-        box_line "  SSL Proxy: HABILITADO"
-        box_line "  Payload: default"
-        box_bottom
-        echo ""
-        echo -e "${YELLOW}Logs: journalctl -u proxy-443.service -f${NC}"
-    else
-        echo -e "${RED}Falha ao iniciar na porta 443!${NC}"
-        echo -e "${YELLOW}Logs: journalctl -u proxy-443.service -f${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# ============================================
-# Criar serviço padrão
-# ============================================
-create_service() {
-    local PORT=$1
-    local HTTPS=$2
-    local STATUS=$3
-    local SSH_ONLY=$4
-    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
-
-    EXTRA_ARGS="-p ${PORT}"
-
-    if [[ -n "$STATUS" ]]; then
-        EXTRA_ARGS="${EXTRA_ARGS} -s ${STATUS}"
-    fi
-
-    if [[ "$HTTPS" == "s" ]]; then
-        EXTRA_ARGS="${EXTRA_ARGS} -t"
-    fi
-
-    if [[ "$SSH_ONLY" == "s" ]]; then
-        EXTRA_ARGS="${EXTRA_ARGS} -ssh"
-    fi
-
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=LKProxy - Porta ${PORT}
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${SDPROXY} ${EXTRA_ARGS}
-Restart=on-failure
-RestartSec=5
-User=root
-WorkingDirectory=/opt/lkproxy
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-# ============================================
-# Criar serviço xHTTP + SSL Tunnel (porta 443)
-# ============================================
-create_xhttp_service() {
-    local PORT=$1
-    local STATUS=$2
-    local SSH_PORT=$3
-    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
-
-    EXTRA_ARGS="-p ${PORT} -s ${STATUS} --ssh-port ${SSH_PORT}"
-
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=LKProxy xHTTP + SSL Tunnel - Porta ${PORT}
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${LKPROXY_XHTTP} ${EXTRA_ARGS}
-Restart=on-failure
-RestartSec=5
-User=root
-WorkingDirectory=/opt/lkproxy
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-# ============================================
-# Fechar Porta
-# ============================================
-close_port() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}Fechar Porta${NC}"
-    box_bottom
-    echo ""
-
-    show_active_ports_boxed
-
-    read -p "Porta: " PORT
-    if [[ -z "$PORT" ]]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        systemctl stop "proxy-${PORT}.service"
-        systemctl disable "proxy-${PORT}.service" 2>/dev/null
-        rm -f "${SYSTEMD_DIR}/proxy-${PORT}.service"
-        systemctl daemon-reload
-        echo -e "${GREEN}Porta ${PORT} fechada com sucesso!${NC}"
-    else
-        echo -e "${RED}Porta ${PORT} não está ativa!${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# ============================================
-# Reiniciar Porta
-# ============================================
-restart_port() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}Reiniciar Porta${NC}"
-    box_bottom
-    echo ""
-
-    show_active_ports_boxed
-
-    read -p "Porta: " PORT
-    if [[ -z "$PORT" ]]; then
-        echo -e "${RED}Porta inválida!${NC}"
-        read -p "Enter pra continuar..."
-        return
-    fi
-
-    if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-        echo -e "${YELLOW}Reiniciando proxy na porta ${PORT}...${NC}"
-        systemctl restart "proxy-${PORT}.service"
-        sleep 2
-
-        if systemctl is-active --quiet "proxy-${PORT}.service" 2>/dev/null; then
-            echo -e "${GREEN}Proxy reiniciado na porta ${PORT}!${NC}"
-        else
-            echo -e "${RED}Falha ao reiniciar proxy na porta ${PORT}!${NC}"
-        fi
-    else
-        echo -e "${RED}Porta ${PORT} não está ativa!${NC}"
-    fi
-
-    echo ""
-    read -p "Enter pra continuar..."
-}
-
-# Caixa de portas ativas usada em fechar/reiniciar
-show_active_ports_boxed() {
-    box_top
-    show_active_ports
-    box_bottom
-    echo ""
-}
-
-# ============================================
-# Loop Principal
-# ============================================
-
 while true; do
     show_menu
     read OPTION
@@ -487,111 +329,7 @@ while true; do
         03|3) restart_port ;;
         04|4) open_xhttp ;;
         05|5) open_integrated ;;
-        00|0) echo -e "${GREEN}Saindo...${NC}"; exit 0 ;;
-        *) echo -e "${RED}Opção inválida!${NC}"; sleep 1 ;;
+        00|0) exit 0 ;;
+        *) sleep 1 ;;
     esac
 done
-
-# ============================================
-# Proxy + Protocolo Integrado (DTUNNEL / XHTTP)
-# ============================================
-open_integrated() {
-    clear
-    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
-    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
-    echo -e "${WHITE}|  CONFIGURACOES ATUAIS                                  |${NC}"
-    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
-    echo -e "${WHITE}|  Porta: 8000                                           |${NC}"
-    echo -e "${WHITE}|  Sub-rede: 10.10.0.0/16                                |${NC}"
-    echo -e "${WHITE}|  Interface TUN: tun0                                   |${NC}"
-    echo -e "${WHITE}|  Protocolos: tcp:8000,udp:8000,quic:8001               |${NC}"
-    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
-    
-    read -p "Porta (Enter para manter [8000]): " PORT
-    [[ -z "$PORT" ]] && PORT="8000"
-    
-    read -p "Sub-rede CIDR (Enter para manter [10.10.0.0/16]): " SUBNET
-    [[ -z "$SUBNET" ]] && SUBNET="10.10.0.0/16"
-    
-    read -p "Interface TUN (Enter para manter [tun0]): " TUN
-    [[ -z "$TUN" ]] && TUN="tun0"
-    
-    echo "Configuração de protocolos:"
-    echo "TCP será ativado obrigatoriamente na porta $PORT"
-    
-    read -p "Deseja ativar UDP na mesma porta? (s/N) " ENABLE_UDP
-    ENABLE_UDP=$(echo "$ENABLE_UDP" | tr '[:upper:]' '[:lower:]')
-    
-    UDP_ARG=""
-    if [[ "$ENABLE_UDP" == "s" ]]; then
-        echo "UDP ativado na porta $PORT"
-        UDP_ARG="--udp"
-    fi
-    
-    read -p "Deseja ativar QUIC? (s/N) " ENABLE_QUIC
-    ENABLE_QUIC=$(echo "$ENABLE_QUIC" | tr '[:upper:]' '[:lower:]')
-    
-    QUIC_ARG=""
-    QUIC_PORT="8001"
-    if [[ "$ENABLE_QUIC" == "s" ]]; then
-        read -p "Porta para QUIC (Enter para 8001): " QUIC_PORT
-        [[ -z "$QUIC_PORT" ]] && QUIC_PORT="8001"
-        echo "QUIC ativado na porta $QUIC_PORT"
-        QUIC_ARG="--quic --quic-port $QUIC_PORT"
-    fi
-    
-    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
-    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
-
-    echo "Configurações salvas!"
-    echo "Criando serviço systemd..."
-    
-    mkdir -p /opt/lkproxy
-    if [ ! -f "/opt/lkproxy/cert.pem" ] || [ ! -f "/opt/lkproxy/key.pem" ]; then
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem \
-            -out /opt/lkproxy/cert.pem -days 365 -nodes \
-            -subj "/CN=lkproxy/O=LKProxy/C=BR" 2>/dev/null
-    fi
-
-    SERVICE_FILE="${SYSTEMD_DIR}/proxy-integrated.service"
-    SDPROXY_INTEGRATED="/opt/lkproxy/proxy-integrated"
-    
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=LKProxy Integrated - Porta ${PORT}
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${SDPROXY_INTEGRATED} -p ${PORT} -s ${STATUS} --tun ${TUN} --subnet ${SUBNET} ${UDP_ARG} ${QUIC_ARG}
-Restart=on-failure
-RestartSec=5
-User=root
-WorkingDirectory=/opt/lkproxy
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    echo "Serviço systemd configurado."
-    echo "Iniciando servidor..."
-    
-    systemctl daemon-reload
-    systemctl enable proxy-integrated.service 2>/dev/null
-    systemctl start proxy-integrated.service 2>/dev/null
-    
-    sleep 2
-    
-    if systemctl is-active --quiet proxy-integrated.service; then
-        echo "Servidor protocolo iniciado com sucesso!"
-        echo "Servidor está ativo e rodando!"
-        PROTO_LIST="tcp:$PORT"
-        [[ "$ENABLE_UDP" == "s" ]] && PROTO_LIST="$PROTO_LIST,udp:$PORT"
-        [[ "$ENABLE_QUIC" == "s" ]] && PROTO_LIST="$PROTO_LIST,quic:$QUIC_PORT"
-        echo "Protocolos configurados: $PROTO_LIST"
-    else
-        echo "Erro ao iniciar o servidor!"
-    fi
-    
-    read -p "Pressione Enter para continuar..."
-}
