@@ -18,6 +18,9 @@ bytes = "1"
 quinn = "0.10"
 rustls-native-certs = "0.6"
 futures-util = "0.3"
+tun = "0.6"
+etherparse = "0.13"
+net2 = "0.2"
 
 [[bin]]
 name = "lkproxy"
@@ -26,3 +29,7 @@ path = "src/main.rs"
 [[bin]]
 name = "lkproxy-xhttp"
 path = "src/bin/xhttp.rs"
+
+[[bin]]
+name = "lkproxy-integrated"
+path = "src/bin/xhttp_integrated.rs"

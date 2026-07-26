@@ -129,6 +129,7 @@ show_menu() {
     box_line "${WHITE}[02]${NC} - FECHAR PORTA"
     box_line "${WHITE}[03]${NC} - REINICIAR PORTA"
     box_line "${MAGENTA}[04]${NC} - xHTTP_SSH / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}"
+    box_line "${BLUE}[05]${NC} - PROXY + PROTOCOLO INTEGRADO (DTUNNEL/XHTTP)"
     box_line ""
     box_line "${WHITE}[00]${NC} - SAIR"
     box_bottom
@@ -485,7 +486,112 @@ while true; do
         02|2) close_port ;;
         03|3) restart_port ;;
         04|4) open_xhttp ;;
+        05|5) open_integrated ;;
         00|0) echo -e "${GREEN}Saindo...${NC}"; exit 0 ;;
         *) echo -e "${RED}Opção inválida!${NC}"; sleep 1 ;;
     esac
 done
+
+# ============================================
+# Proxy + Protocolo Integrado (DTUNNEL / XHTTP)
+# ============================================
+open_integrated() {
+    clear
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    echo -e "${WHITE}|  CONFIGURACOES ATUAIS                                  |${NC}"
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    echo -e "${WHITE}|  Porta: 8000                                           |${NC}"
+    echo -e "${WHITE}|  Sub-rede: 10.10.0.0/16                                |${NC}"
+    echo -e "${WHITE}|  Interface TUN: tun0                                   |${NC}"
+    echo -e "${WHITE}|  Protocolos: tcp:8000,udp:8000,quic:8001               |${NC}"
+    echo -e "${CYAN}+--------------------------------------------------------+${NC}"
+    
+    read -p "Porta (Enter para manter [8000]): " PORT
+    [[ -z "$PORT" ]] && PORT="8000"
+    
+    read -p "Sub-rede CIDR (Enter para manter [10.10.0.0/16]): " SUBNET
+    [[ -z "$SUBNET" ]] && SUBNET="10.10.0.0/16"
+    
+    read -p "Interface TUN (Enter para manter [tun0]): " TUN
+    [[ -z "$TUN" ]] && TUN="tun0"
+    
+    echo "Configuração de protocolos:"
+    echo "TCP será ativado obrigatoriamente na porta $PORT"
+    
+    read -p "Deseja ativar UDP na mesma porta? (s/N) " ENABLE_UDP
+    ENABLE_UDP=$(echo "$ENABLE_UDP" | tr '[:upper:]' '[:lower:]')
+    
+    UDP_ARG=""
+    if [[ "$ENABLE_UDP" == "s" ]]; then
+        echo "UDP ativado na porta $PORT"
+        UDP_ARG="--udp"
+    fi
+    
+    read -p "Deseja ativar QUIC? (s/N) " ENABLE_QUIC
+    ENABLE_QUIC=$(echo "$ENABLE_QUIC" | tr '[:upper:]' '[:lower:]')
+    
+    QUIC_ARG=""
+    QUIC_PORT="8001"
+    if [[ "$ENABLE_QUIC" == "s" ]]; then
+        read -p "Porta para QUIC (Enter para 8001): " QUIC_PORT
+        [[ -z "$QUIC_PORT" ]] && QUIC_PORT="8001"
+        echo "QUIC ativado na porta $QUIC_PORT"
+        QUIC_ARG="--quic --quic-port $QUIC_PORT"
+    fi
+    
+    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
+    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
+
+    echo "Configurações salvas!"
+    echo "Criando serviço systemd..."
+    
+    mkdir -p /opt/lkproxy
+    if [ ! -f "/opt/lkproxy/cert.pem" ] || [ ! -f "/opt/lkproxy/key.pem" ]; then
+        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem \
+            -out /opt/lkproxy/cert.pem -days 365 -nodes \
+            -subj "/CN=lkproxy/O=LKProxy/C=BR" 2>/dev/null
+    fi
+
+    SERVICE_FILE="${SYSTEMD_DIR}/proxy-integrated.service"
+    SDPROXY_INTEGRATED="/opt/lkproxy/proxy-integrated"
+    
+    cat > "$SERVICE_FILE" << EOF
+[Unit]
+Description=LKProxy Integrated - Porta ${PORT}
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=${SDPROXY_INTEGRATED} -p ${PORT} -s ${STATUS} --tun ${TUN} --subnet ${SUBNET} ${UDP_ARG} ${QUIC_ARG}
+Restart=on-failure
+RestartSec=5
+User=root
+WorkingDirectory=/opt/lkproxy
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    echo "Serviço systemd configurado."
+    echo "Iniciando servidor..."
+    
+    systemctl daemon-reload
+    systemctl enable proxy-integrated.service 2>/dev/null
+    systemctl start proxy-integrated.service 2>/dev/null
+    
+    sleep 2
+    
+    if systemctl is-active --quiet proxy-integrated.service; then
+        echo "Servidor protocolo iniciado com sucesso!"
+        echo "Servidor está ativo e rodando!"
+        PROTO_LIST="tcp:$PORT"
+        [[ "$ENABLE_UDP" == "s" ]] && PROTO_LIST="$PROTO_LIST,udp:$PORT"
+        [[ "$ENABLE_QUIC" == "s" ]] && PROTO_LIST="$PROTO_LIST,quic:$QUIC_PORT"
+        echo "Protocolos configurados: $PROTO_LIST"
+    else
+        echo "Erro ao iniciar o servidor!"
+    fi
+    
+    read -p "Pressione Enter para continuar..."
+}

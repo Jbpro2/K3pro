@@ -96,6 +96,12 @@ if [ -f ./target/release/lkproxy-xhttp ]; then
     ln -sf /opt/lkproxy/proxy-xhttp /usr/local/bin/lkproxy-xhttp
 fi
 
+if [ -f ./target/release/lkproxy-integrated ]; then
+    cp -f ./target/release/lkproxy-integrated /opt/lkproxy/proxy-integrated
+    chmod +x /opt/lkproxy/proxy-integrated
+    ln -sf /opt/lkproxy/proxy-integrated /usr/local/bin/lkproxy-integrated
+fi
+
 # Menu
 if [ -f "menu.sh" ]; then
     cp -f menu.sh /opt/lkproxy/menu
