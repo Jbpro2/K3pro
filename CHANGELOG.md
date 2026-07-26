@@ -1,4 +1,4 @@
-# LKProxy - Changelog
+# Mpro - Changelog
 
 ## v2.4.1 - xHTTP SplitHTTP (DTUNNEL Fix)
 
@@ -26,16 +26,16 @@
 
 ```bash
 # Multi-protocolo completo (TCP + UDP + QUIC) na 443
-./lkproxy -p 443 -t -ssh
+./mpro -p 443 -t -ssh
 
 # Apenas TCP + UDP
-./lkproxy -p 443 -t -u -ssh
+./mpro -p 443 -t -u -ssh
 
 # Apenas TCP + QUIC
-./lkproxy -p 443 -t -q -ssh
+./mpro -p 443 -t -q -ssh
 
 # QUIC em porta separada
-./lkproxy -p 443 -t -q --quic-port 8001 -ssh
+./mpro -p 443 -t -q --quic-port 8001 -ssh
 ```
 
 ### Configuração do menu.sh
@@ -47,14 +47,14 @@ Ao abrir a porta 443 com HTTPS habilitado, o proxy agora inicia automaticamente:
 
 ### Certificados
 
-Os certificados QUIC são gerados automaticamente em `/opt/lkproxy/cert.pem` e `/opt/lkproxy/key.pem` na primeira execução com QUIC ativo.
+Os certificados QUIC são gerados automaticamente em `/opt/mpro/cert.pem` e `/opt/mpro/key.pem` na primeira execução com QUIC ativo.
 
 ### Arquitetura
 
 ```
-Cliente → [TCP:443] → LKProxy → SSH:22 / VPN:1194
-Cliente → [UDP:443] → LKProxy → SSH:22 / VPN:1194
-Cliente → [QUIC:8001] → LKProxy → SSH:22 / VPN:1194
+Cliente → [TCP:443] → Mpro → SSH:22 / VPN:1194
+Cliente → [UDP:443] → Mpro → SSH:22 / VPN:1194
+Cliente → [QUIC:8001] → Mpro → SSH:22 / VPN:1194
 ```
 
 ---

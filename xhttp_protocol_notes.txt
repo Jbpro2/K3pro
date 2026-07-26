@@ -18,7 +18,7 @@ XHTTP Protocol Details (SocksRevive-XHTTP):
    - Accept sequence-numbered POST bodies and forward to SSH.
    - Trust-all TLS (Server certificate doesn't need to be valid).
 
-Current BDRProxy Implementation Issues:
+Current Mpro Implementation Issues:
 - The path parsing might be too strict or incorrect.
 - The `is_xhttp_path` check might not be matching the `{basePath}/{sessionId}` structure correctly if basePath is empty or contains multiple slashes.
 - The sequence number in POST is being parsed but we need to ensure it doesn't break if it's missing or formatted differently.

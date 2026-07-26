@@ -321,7 +321,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lkproxy"
+name = "mpro"
 version = "2.5.0"
 dependencies = [
  "anyhow",

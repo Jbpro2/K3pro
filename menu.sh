@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ============================================
-# LKProxy Menu - Free v2.3
+# Mpro Menu - Free v2.3
 # ============================================
 
-LKPROXY="/opt/lkproxy/proxy"
-LKPROXY_XHTTP="/opt/lkproxy/proxy-xhttp"
-LKPROXY_INTEGRATED="/opt/lkproxy/proxy-integrated"
+LKPROXY="/opt/mpro/proxy"
+LKPROXY_XHTTP="/opt/mpro/proxy-xhttp"
+LKPROXY_INTEGRATED="/opt/mpro/proxy-integrated"
 SYSTEMD_DIR="/etc/systemd/system"
 
 # Cores
@@ -123,7 +123,7 @@ create_service() {
     [[ "$SSH_ONLY" == "s" ]] && EXTRA_ARGS="${EXTRA_ARGS} -ssh"
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=LKProxy - Porta ${PORT}
+Description=Mpro - Porta ${PORT}
 After=network.target
 [Service]
 Type=simple
@@ -131,7 +131,7 @@ ExecStart=${LKPROXY} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/lkproxy
+WorkingDirectory=/opt/mpro
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -145,7 +145,7 @@ create_xhttp_service() {
     EXTRA_ARGS="-p ${PORT} -s ${STATUS} --ssh-port ${SSH_PORT}"
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=LKProxy xHTTP + SSL Tunnel - Porta ${PORT}
+Description=Mpro xHTTP + SSL Tunnel - Porta ${PORT}
 After=network.target
 [Service]
 Type=simple
@@ -153,7 +153,7 @@ ExecStart=${LKPROXY_XHTTP} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/lkproxy
+WorkingDirectory=/opt/mpro
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -176,10 +176,10 @@ open_port() {
         echo -e "${RED}Porta ${PORT} já está em uso!${NC}"; sleep 2; return
     fi
     read -p "Habilitar o HTTPS? (s/n): " HTTPS
-    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
-    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
+    read -p "Status HTTP (Padrão: @Mpro): " STATUS
+    [[ -z "$STATUS" ]] && STATUS="@Mpro"
     read -p "Habilitar somente SSH? (s/n): " SSH_ONLY
-    mkdir -p /opt/lkproxy
+    mkdir -p /opt/mpro
     create_service "$PORT" "$HTTPS" "$STATUS" "$SSH_ONLY"
     systemctl daemon-reload
     systemctl enable "proxy-${PORT}.service" 2>/dev/null
@@ -196,13 +196,13 @@ open_xhttp() {
     box_line "${WHITE}${BOLD}xHTTP_SSH / SSL TUNNEL - Porta 443${NC}"
     box_bottom
     echo ""
-    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
-    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
+    read -p "Status HTTP (Padrão: @Mpro): " STATUS
+    [[ -z "$STATUS" ]] && STATUS="@Mpro"
     read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
     [[ -z "$SSH_PORT" ]] && SSH_PORT="22"
-    mkdir -p /opt/lkproxy
-    if [ ! -f "/opt/lkproxy/cert.pem" ]; then
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem -out /opt/lkproxy/cert.pem -days 365 -nodes -subj "/CN=lkproxy" 2>/dev/null
+    mkdir -p /opt/mpro
+    if [ ! -f "/opt/mpro/cert.pem" ]; then
+        openssl req -x509 -newkey rsa:2048 -keyout /opt/mpro/key.pem -out /opt/mpro/cert.pem -days 365 -nodes -subj "/CN=mpro" 2>/dev/null
     fi
     create_xhttp_service "443" "$STATUS" "$SSH_PORT"
     systemctl daemon-reload
@@ -239,15 +239,15 @@ open_integrated() {
         [[ -z "$QPORT" ]] && QPORT="8001"
         QUIC_ARG="--quic --quic-port $QPORT"
     fi
-    read -p "Status HTTP (Padrão: @LKProxy): " STATUS
-    [[ -z "$STATUS" ]] && STATUS="@LKProxy"
-    mkdir -p /opt/lkproxy
-    if [ ! -f "/opt/lkproxy/cert.pem" ]; then
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem -out /opt/lkproxy/cert.pem -days 365 -nodes -subj "/CN=lkproxy" 2>/dev/null
+    read -p "Status HTTP (Padrão: @Mpro): " STATUS
+    [[ -z "$STATUS" ]] && STATUS="@Mpro"
+    mkdir -p /opt/mpro
+    if [ ! -f "/opt/mpro/cert.pem" ]; then
+        openssl req -x509 -newkey rsa:2048 -keyout /opt/mpro/key.pem -out /opt/mpro/cert.pem -days 365 -nodes -subj "/CN=mpro" 2>/dev/null
     fi
     cat > "${SYSTEMD_DIR}/proxy-integrated.service" << EOF
 [Unit]
-Description=LKProxy Integrated
+Description=Mpro Integrated
 After=network.target
 [Service]
 Type=simple
@@ -255,7 +255,7 @@ ExecStart=${LKPROXY_INTEGRATED} -p ${PORT} -s ${STATUS} --tun ${TUN} --subnet ${
 Restart=on-failure
 RestartSec=5
 User=root
-WorkingDirectory=/opt/lkproxy
+WorkingDirectory=/opt/mpro
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -305,7 +305,7 @@ show_menu() {
     show_banner
     echo ""
     box_top
-    box_line "${WHITE}${BOLD}LKProxy Menu Free v2.3${NC}"
+    box_line "${WHITE}${BOLD}Mpro Menu Free v2.3${NC}"
     box_mid
     show_active_ports
     box_mid

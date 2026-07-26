@@ -14,7 +14,7 @@ async fn main() -> Result<(), Error> {
     let use_quic = has_arg("-q");
     let quic_port = get_quic_port();
 
-    println!("[LKProxy] Multi-protocolo v2.5.0");
+    println!("[Mpro] Multi-protocolo v2.5.0");
     println!("[TCP] Porta: {}", port);
     
     if use_udp {
@@ -150,7 +150,7 @@ fn get_status() -> String {
             return args[i + 1].clone();
         }
     }
-    "@LKProxy".to_string()
+    "@Mpro".to_string()
 }
 
 fn has_arg(arg: &str) -> bool {

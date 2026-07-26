@@ -1,4 +1,4 @@
-# LKProxy v2.0 - com suporte xHTTP (SplitHTTP)
+# Mpro v2.0 - com suporte xHTTP (SplitHTTP)
 
 Proxy multi-protocolo em Rust com suporte exclusivo para o protocolo xHTTP (SplitHTTP) na porta 443, compatível com o cliente **XHTTP-DEMO**.
 
@@ -32,14 +32,14 @@ chmod +x install.sh
 ## Uso
 
 ```bash
-lkproxy    # Menu interativo
+mpro    # Menu interativo
 ```
 
 ### Menu v2.0
 
 ```
 ╔══════════════════════════════════╗
-║       LKProxy Menu Free v2.0     ║
+║       Mpro Menu Free v2.0     ║
 ╠══════════════════════════════════╣
 ║                                  ║
 ║ [01] - ABRIR PORTA               ║
@@ -59,12 +59,12 @@ Esta opção é **exclusiva** para o protocolo xHTTP (SplitHTTP) e funciona assi
 2. **TLS obrigatório** - Certificado auto-assinado gerado automaticamente
 3. **SSH only** - Tunnel para SSH local (127.0.0.1:22)
 4. **UDP + QUIC** - Ativados automaticamente
-5. **Status HTTP** - Cabeçalho retornado ao cliente (padrão: @LKProxy)
+5. **Status HTTP** - Cabeçalho retornado ao cliente (padrão: @Mpro)
 
 ### Fluxo do xHTTP
 
 ```
-Cliente (SocksRevive)          Servidor (LKProxy)
+Cliente (SocksRevive)          Servidor (Mpro)
        │                              │
        ├── TCP connect :443 ──────────┤
        ├── TLS ClientHello ───────────┤
@@ -90,7 +90,7 @@ Cliente (SocksRevive)          Servidor (LKProxy)
 
 | Campo | Valor |
 |-------|-------|
-| Server | IP do servidor LKProxy |
+| Server | IP do servidor Mpro |
 | Port | 443 |
 | SNI | Qualquer domínio (trust-all) |
 | XHTTP Host | IP do servidor ou vazio |
@@ -103,7 +103,7 @@ Cliente (SocksRevive)          Servidor (LKProxy)
 
 ```
 -p PORTA       Porta TCP (padrão: 80)
--s STATUS      Status HTTP (padrão: @LKProxy)
+-s STATUS      Status HTTP (padrão: @Mpro)
 -t             Habilitar TLS
 -ssh           SSH only (tunnel para 127.0.0.1:22)
 -u             Habilitar UDP
@@ -115,7 +115,7 @@ Cliente (SocksRevive)          Servidor (LKProxy)
 
 O TLS na v2.0 usa **terminação local** com `rustls`:
 
-1. O certificado e chave são gerados em `/opt/lkproxy/`
+1. O certificado e chave são gerados em `/opt/mpro/`
 2. O proxy faz handshake TLS completo com o cliente
 3. Os dados decodificados são roteados para o handler correto
 4. Para xHTTP: os dados HTTP/2 ficam visíveis após TLS

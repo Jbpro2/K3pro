@@ -1,9 +1,9 @@
 #!/bin/bash
-# LKProxy Installer - Version v3.1.0
+# Mpro Installer - Version v3.1.0
 
 REPO_URL="https://github.com/Lacasx1/Mpro.git"
 REPO_BRANCH="main"
-CMD_NAME="lkproxy"
+CMD_NAME="mpro"
 TOTAL_STEPS=7
 
 CURRENT_STEP=0
@@ -48,7 +48,7 @@ echo -e "${PURPLE}${BOLD} ██║ ╚═╝ ██║██║     ██║  
 echo -e "${BLUE}${BOLD} ╚═╝     ╚═╝╚═╝     ╚═╝  ╚═╝ ╚═════╝ ${NC}"
 echo -e "${BLUE}${BOLD}         F R E E   V E R S I O N       ${NC}"
 echo -e "${BLUE}${BOLD}----------------------------------------${NC}"
-log_info "Iniciando instalação do LKProxy v3.1.0 (🇧🇷)..."
+log_info "Iniciando instalação do Mpro v3.1.0 (🇧🇷)..."
 
 # --- Etapa 1 ---
 show_progress "Atualizando dependências..."
@@ -66,60 +66,60 @@ fi
 
 # --- Etapa 3 ---
 show_progress "Baixando código fonte..."
-rm -rf /tmp/LKProxy_build
-git clone --branch "$REPO_BRANCH" "$REPO_URL" /tmp/LKProxy_build > /dev/null 2>&1 || log_error "Falha ao clonar repositório."
-cd /tmp/LKProxy_build || log_error "Falha ao acessar diretório."
+rm -rf /tmp/Mpro_build
+git clone --branch "$REPO_BRANCH" "$REPO_URL" /tmp/Mpro_build > /dev/null 2>&1 || log_error "Falha ao clonar repositório."
+cd /tmp/Mpro_build || log_error "Falha ao acessar diretório."
 
 # --- Etapa 4 ---
 show_progress "Compilando (2-5 min)..."
-cargo build --release > /tmp/lkproxy_build.log 2>&1
+cargo build --release > /tmp/mpro_build.log 2>&1
 if [ $? -ne 0 ]; then
-    cat /tmp/lkproxy_build.log
+    cat /tmp/mpro_build.log
     log_error "Falha na compilação. Veja logs acima."
 fi
 
 # --- Etapa 5 ---
 show_progress "Instalando binários..."
-mkdir -p /opt/lkproxy
+mkdir -p /opt/mpro
 
 # Parar processos antigos para liberar os arquivos
-pkill -f "lkproxy" > /dev/null 2>&1
-pkill -f "lkproxy-xhttp" > /dev/null 2>&1
+pkill -f "mpro" > /dev/null 2>&1
+pkill -f "mpro-xhttp" > /dev/null 2>&1
 sleep 1
 
 # Copiar com força (-f)
-cp -f ./target/release/lkproxy /opt/lkproxy/proxy || log_error "Falha ao copiar lkproxy. Verifique se o disco está cheio."
-chmod +x /opt/lkproxy/proxy
+cp -f ./target/release/mpro /opt/mpro/proxy || log_error "Falha ao copiar mpro. Verifique se o disco está cheio."
+chmod +x /opt/mpro/proxy
 
-if [ -f ./target/release/lkproxy-xhttp ]; then
-    cp -f ./target/release/lkproxy-xhttp /opt/lkproxy/proxy-xhttp
-    chmod +x /opt/lkproxy/proxy-xhttp
-    ln -sf /opt/lkproxy/proxy-xhttp /usr/local/bin/lkproxy-xhttp
+if [ -f ./target/release/mpro-xhttp ]; then
+    cp -f ./target/release/mpro-xhttp /opt/mpro/proxy-xhttp
+    chmod +x /opt/mpro/proxy-xhttp
+    ln -sf /opt/mpro/proxy-xhttp /usr/local/bin/mpro-xhttp
 fi
 
-if [ -f ./target/release/lkproxy-integrated ]; then
-    cp -f ./target/release/lkproxy-integrated /opt/lkproxy/proxy-integrated
-    chmod +x /opt/lkproxy/proxy-integrated
-    ln -sf /opt/lkproxy/proxy-integrated /usr/local/bin/lkproxy-integrated
+if [ -f ./target/release/mpro-integrated ]; then
+    cp -f ./target/release/mpro-integrated /opt/mpro/proxy-integrated
+    chmod +x /opt/mpro/proxy-integrated
+    ln -sf /opt/mpro/proxy-integrated /usr/local/bin/mpro-integrated
 fi
 
 # Menu
 if [ -f "menu.sh" ]; then
-    cp -f menu.sh /opt/lkproxy/menu
-    chmod +x /opt/lkproxy/menu
-    ln -sf /opt/lkproxy/menu /usr/local/bin/lkproxy
+    cp -f menu.sh /opt/mpro/menu
+    chmod +x /opt/mpro/menu
+    ln -sf /opt/mpro/menu /usr/local/bin/mpro
 fi
 
 # Certificados
-if [ ! -f /opt/lkproxy/cert.pem ]; then
-    openssl req -x509 -newkey rsa:2048 -keyout /opt/lkproxy/key.pem -out /opt/lkproxy/cert.pem -days 3650 -nodes -subj "/CN=LKProxy" 2>/dev/null
+if [ ! -f /opt/mpro/cert.pem ]; then
+    openssl req -x509 -newkey rsa:2048 -keyout /opt/mpro/key.pem -out /opt/mpro/cert.pem -days 3650 -nodes -subj "/CN=Mpro" 2>/dev/null
 fi
 
 # --- Etapa 6 ---
 show_progress "Limpando..."
-rm -rf /tmp/LKProxy_build
+rm -rf /tmp/Mpro_build
 
 # --- Etapa 7 ---
 log_success "Instalação concluída com sucesso!"
-echo -e "Use o comando ${YELLOW}lkproxy${NC} para abrir o menu."
+echo -e "Use o comando ${YELLOW}mpro${NC} para abrir o menu."
 echo -e "--------------------------------------------------------------"

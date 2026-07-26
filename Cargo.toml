@@ -1,5 +1,5 @@
 [package]
-name = "lkproxy"
+name = "mpro"
 version = "2.5.0"
 edition = "2021"
 
@@ -23,13 +23,13 @@ etherparse = "0.13"
 net2 = "0.2"
 
 [[bin]]
-name = "lkproxy"
+name = "mpro"
 path = "src/main.rs"
 
 [[bin]]
-name = "lkproxy-xhttp"
+name = "mpro-xhttp"
 path = "src/bin/xhttp.rs"
 
 [[bin]]
-name = "lkproxy-integrated"
+name = "mpro-integrated"
 path = "src/bin/xhttp_integrated.rs"
