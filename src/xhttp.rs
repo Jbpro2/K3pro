@@ -28,7 +28,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[BDRProxy] xHTTP v3.3.4 (XHTTP + SSL Payload Support)");
+    println!("[LKProxy] xHTTP v3.3.4 (XHTTP + SSL Payload Support)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
