@@ -191,7 +191,7 @@ open_port() {
 
     mkdir -p /opt/lkproxy
 
-    if [ ! -f "$SDPROXY" ]; then
+    if [ ! -f "$LKPROXY" ]; then
         echo -e "${RED}LKProxy não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
@@ -244,7 +244,7 @@ open_xhttp() {
 
     mkdir -p /opt/lkproxy
 
-    if [ ! -f "$SDPROXY_XHTTP" ]; then
+    if [ ! -f "$LKPROXY_XHTTP" ]; then
         echo -e "${RED}lkproxy-xhttp não encontrado! Execute o install.sh primeiro.${NC}"
         read -p "Enter pra continuar..."
         return
@@ -380,7 +380,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${SDPROXY_XHTTP} ${EXTRA_ARGS}
+ExecStart=${LKPROXY_XHTTP} ${EXTRA_ARGS}
 Restart=on-failure
 RestartSec=5
 User=root
