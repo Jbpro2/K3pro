@@ -76,7 +76,7 @@ async fn handle_client(mut client_stream: TcpStream, status: &str) -> Result<(),
 
     // Detecta SSH vs VPN pelo peek
     let mut addr_proxy = "127.0.0.1:22";
-    let result = timeout(Duration::from_secs(1), peek_stream(&mut client_stream)).await
+    let result = timeout(Duration::from_secs(2), peek_stream(&mut client_stream)).await
         .unwrap_or_else(|_| Ok(String::new()));
 
     if let Ok(data) = result {
@@ -87,12 +87,11 @@ async fn handle_client(mut client_stream: TcpStream, status: &str) -> Result<(),
         }
     }
 
-    let server_connect = TcpStream::connect(addr_proxy).await;
-    if server_connect.is_err() {
-        return Ok(());
-    }
-
-    let server_stream = server_connect?;
+    let server_connect = timeout(Duration::from_secs(5), TcpStream::connect(addr_proxy)).await;
+    let server_stream = match server_connect {
+        Ok(Ok(s)) => s,
+        _ => return Ok(()),
+    };
     let (mut client_read, mut client_write) = client_stream.into_split();
     let (mut server_read, mut server_write) = server_stream.into_split();
 
