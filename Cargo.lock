@@ -321,29 +321,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mpro"
-version = "2.5.0"
-dependencies = [
- "anyhow",
- "bytes",
- "env_logger",
- "etherparse",
- "futures-util",
- "h2",
- "http",
- "log",
- "net2",
- "once_cell",
- "quinn",
- "rustls",
- "rustls-native-certs",
- "rustls-pemfile",
- "tokio",
- "tokio-rustls",
- "tun",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -373,6 +350,30 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mpro"
+version = "2.5.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "env_logger",
+ "etherparse",
+ "futures-util",
+ "h2",
+ "http",
+ "libc",
+ "log",
+ "net2",
+ "once_cell",
+ "quinn",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "tokio",
+ "tokio-rustls",
+ "tun",
 ]
 
 [[package]]

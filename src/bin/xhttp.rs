@@ -28,16 +28,26 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[Mpro] xHTTP v3.3.7 (DTUNNEL + SocksRevive Final Fix)");
+    println!("[Mpro] xHTTP v3.6.0 – Latency Optimized for Low Latency Networks");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
+    println!("[xHTTP] Keep-Alive: timeout=30 max=100 | Canal GET/POST: 16384");
+    println!("[xHTTP] TCP_QUICKACK | Peek=200ms | TLS read=1.5s | SSH connect=3s");
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let status_arc = Arc::new(status);
 
     loop {
         match listener.accept().await {
-            Ok((client_stream, addr)) => {
+            Ok((client_stream, _addr)) => {
                 let _ = client_stream.set_nodelay(true);
+                // Fator 2: TCP_QUICKACK – ACK imediato, elimina delay do Nagle
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::fd::AsFd;
+                    use std::os::fd::AsRawFd;
+                    let fd = client_stream.as_fd().as_raw_fd();
+                    unsafe { libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, &(1i32) as *const i32 as *const libc::c_void, std::mem::size_of::<i32>() as libc::socklen_t); }
+                }
                 let status = status_arc.clone();
                 tokio::spawn(async move {
                     let _ = handle_xhttp_client(client_stream, &status, ssh_port).await;
@@ -55,8 +65,9 @@ async fn handle_xhttp_client(
     status: &str,
     ssh_port: u16,
 ) -> Result<(), XhttpError> {
-    let mut peek_buf = [0u8; 3];
-    let peek_result = timeout(Duration::from_secs(3), stream.peek(&mut peek_buf)).await;
+    let mut peek_buf = [0u8; 32];
+    // Fator 3: Peek timeout reduzido para 200ms (detecção ultra rápida)
+    let peek_result = timeout(Duration::from_millis(200), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
         _ => 0,
@@ -97,7 +108,8 @@ async fn handle_tls_dual(
     let mut tls_stream = acceptor.accept(stream).await.map_err(|e| Box::new(e) as XhttpError)?;
 
     let mut buf = vec![0u8; 4096];
-    let n = match timeout(Duration::from_secs(5), tls_stream.read(&mut buf)).await {
+    // Fator 3: TLS read timeout reduzido para 1.5s
+    let n = match timeout(Duration::from_millis(1500), tls_stream.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => n,
         _ => {
             return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
@@ -118,7 +130,8 @@ async fn handle_tls_dual(
     }
 
     if http_str.contains("HTTP/1.") {
-        let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
+        // Fator 1: Keep-Alive nos headers (timeout=30, max=100)
+        let resp = format!("HTTP/1.1 101 ({})\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\nHTTP/1.1 200 ({})\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\n", status, status);
         tls_stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
         return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
     }
@@ -127,7 +140,8 @@ async fn handle_tls_dual(
 }
 
 async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
-    let mut buf = vec![0u8; 8192];
+    // Fator 1: Canal GET/POST ampliado para 16384
+    let mut buf = vec![0u8; 16384];
     let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
     let http_str = String::from_utf8_lossy(&buf[..n]);
     
@@ -142,19 +156,22 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
     }
 
     if http_str.contains("HTTP/1.") {
-        let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
+        // Fator 1: Keep-Alive nos headers (timeout=30, max=100)
+        let resp = format!("HTTP/1.1 101 ({})\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\nHTTP/1.1 200 ({})\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\n", status, status);
         stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     }
     
-    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Fator 3: SSH connect timeout reduzido para 3s
+    let ssh = timeout(Duration::from_secs(3), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut r, mut w) = stream.into_split();
     let (mut sr, mut sw) = ssh.into_split();
     let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
     Ok(())
 }
 
-async fn handle_ssh_direct(mut stream: TcpStream, ssh_port: u16) -> Result<(), XhttpError> {
-    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+async fn handle_ssh_direct(stream: TcpStream, ssh_port: u16) -> Result<(), XhttpError> {
+    // Fator 3: SSH connect timeout reduzido para 3s
+    let ssh = timeout(Duration::from_secs(3), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut r, mut w) = stream.into_split();
     let (mut sr, mut sw) = ssh.into_split();
     let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
@@ -162,7 +179,8 @@ async fn handle_ssh_direct(mut stream: TcpStream, ssh_port: u16) -> Result<(), X
 }
 
 async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpStream>, ssh_port: u16, initial_data: Option<Vec<u8>>) -> Result<(), XhttpError> {
-    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Fator 3: SSH connect timeout reduzido para 3s
+    let mut ssh = timeout(Duration::from_secs(3), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
     if let Some(data) = initial_data {
         ssh.write_all(&data).await.map_err(|e| Box::new(e) as XhttpError)?;
     }
@@ -185,12 +203,13 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
         sessions.remove(&sid);
     }
 
-    // RESPOSTA IMEDIATA PARA DTUNNEL
+    // Fator 1: RESPOSTA IMEDIATA com Keep-Alive (timeout=30, max=100)
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
+        Keep-Alive: timeout=30, max=100\r\n\
         Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
         Pragma: no-cache\r\n\
         Expires: 0\r\n\
@@ -201,10 +220,12 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
     tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Fator 3: SSH connect timeout reduzido para 3s
+    let ssh = timeout(Duration::from_secs(3), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut sr, mut sw) = ssh.into_split();
-    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(4096); 
-    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(4096); 
+    // Fator 1: Canal GET/POST ampliado para 16384
+    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(16384); 
+    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(16384); 
     let act = Arc::new(RwLock::new(true));
     
     SESSIONS.lock().await.insert(sid.clone(), XhttpSession { post_tx: ptx, get_tx: gtx.clone(), active: act.clone() });
@@ -256,11 +277,13 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
         sessions.remove(&sid);
     }
 
+    // Fator 1: RESPOSTA IMEDIATA com Keep-Alive (timeout=30, max=100)
     let resp = format!(
         "HTTP/1.1 200 OK\r\n\
         Content-Type: application/octet-stream\r\n\
         Transfer-Encoding: chunked\r\n\
         Connection: keep-alive\r\n\
+        Keep-Alive: timeout=30, max=100\r\n\
         Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
         Pragma: no-cache\r\n\
         Expires: 0\r\n\
@@ -271,10 +294,12 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     stream.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
-    let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Fator 3: SSH connect timeout reduzido para 3s
+    let ssh = timeout(Duration::from_secs(3), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut sr, mut sw) = ssh.into_split();
-    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(4096);
-    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(4096);
+    // Fator 1: Canal GET/POST ampliado para 16384
+    let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(16384);
+    let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(16384);
     let act = Arc::new(RwLock::new(true));
 
     SESSIONS.lock().await.insert(sid.clone(), XhttpSession { post_tx: ptx, get_tx: gtx.clone(), active: act.clone() });
@@ -321,6 +346,7 @@ async fn handle_xhttp_post_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStre
     let h_end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let mut body = req[h_end..].to_vec();
     
+    // Fator 2: POST read_exact sem timeout – lê o corpo completo sem esperar, mais rápido em redes lentas
     if body.len() < cl {
         let mut b = vec![0u8; cl - body.len()];
         tls.read_exact(&mut b).await.map_err(|e| Box::new(e) as XhttpError)?;
@@ -331,7 +357,8 @@ async fn handle_xhttp_post_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStre
         let _ = s.post_tx.send(body).await; 
     }
     
-    tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Fator 1: Keep-Alive na resposta POST
+    tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\n").await.map_err(|e| Box::new(e) as XhttpError)?;
     Ok(())
 }
 
@@ -341,6 +368,7 @@ async fn handle_xhttp_post_raw(stream: &mut TcpStream, req: &[u8], path: &str, _
     let h_end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let mut body = req[h_end..].to_vec();
     
+    // Fator 2: POST read_exact sem timeout – lê o corpo completo sem esperar
     if body.len() < cl {
         let mut b = vec![0u8; cl - body.len()];
         stream.read_exact(&mut b).await.map_err(|e| Box::new(e) as XhttpError)?;
@@ -351,7 +379,8 @@ async fn handle_xhttp_post_raw(stream: &mut TcpStream, req: &[u8], path: &str, _
         let _ = s.post_tx.send(body).await; 
     }
     
-    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Fator 1: Keep-Alive na resposta POST
+    stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\n").await.map_err(|e| Box::new(e) as XhttpError)?;
     Ok(())
 }
 

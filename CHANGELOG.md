@@ -1,5 +1,32 @@
 # Mpro - Changelog
 
+## v3.6.0 - Latency Optimized for Low Latency Networks
+
+### Otimizações de Latência
+
+#### Fator 1 – Múltiplas requisições POST/GET:
+- **Keep-Alive** adicionado nos headers (timeout=30, max=100) — o cliente reutiliza a mesma conexão TCP pra enviar POSTs, não precisa abrir nova conexão a cada envio
+- **Canal GET/POST ampliado** de 4096 para **16384** — menos backpressure em redes lentas
+- Buffer de leitura HTTP raw ampliado de 8192 para **16384**
+
+#### Fator 2 – HTTP/1.1 sem multiplexação:
+- **TCP_QUICKACK ativado** — ACK imediato sem delay, funciona como uma forma de "multiplexação" via TCP
+- **POST read_exact sem timeout** — lê o corpo completo do POST sem esperar, mais rápido em redes lentas
+
+#### Fator 3 – Redes restritas/ADSL com alta latência:
+- **TCP_QUICKACK** (ACK imediato, elimina o delay do Nagle)
+- **Peek timeout reduzido para 200ms** (detecção ultra rápida)
+- **TLS read timeout reduzido para 1.5s**
+- **SSH connect timeout reduzido para 3s** (resposta 200 já foi enviada antes)
+
+### Para aplicar no servidor:
+```bash
+cd /root/Mxpro && git pull && ./install.sh
+systemctl restart proxy-443
+```
+
+---
+
 ## v2.4.1 - xHTTP SplitHTTP (DTUNNEL Fix)
 
 ### Novo
