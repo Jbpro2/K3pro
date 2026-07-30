@@ -46,9 +46,9 @@ echo -e "${BLUE}${BOLD} ██╔████╔██║██████╔�
 echo -e "${BLUE}${BOLD} ██║╚██╔╝██║██╔═══╝ ██╔══██╗██║   ██║${NC}"
 echo -e "${PURPLE}${BOLD} ██║ ╚═╝ ██║██║     ██║  ██║╚██████╔╝${NC}"
 echo -e "${BLUE}${BOLD} ╚═╝     ╚═╝╚═╝     ╚═╝  ╚═╝ ╚═════╝ ${NC}"
-echo -e "${BLUE}${BOLD}         F R E E   V E R S I O N       ${NC}"
+echo -e "${BLUE}${BOLD}      F R E E  V E R S I O N  brasil 👀   ${NC}"
 echo -e "${BLUE}${BOLD}----------------------------------------${NC}"
-log_info "Iniciando instalação do Mpro v3.1.0 (🇧🇷)..."
+log_info "Iniciando instalação do Mpro v3 (🇧🇷)..."
 
 # --- Etapa 1 ---
 show_progress "Atualizando dependências..."
