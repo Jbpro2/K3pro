@@ -1,7 +1,7 @@
 #!/bin/bash
 # Mpro Installer - Version v3
 
-REPO_URL="https://github.com/Jbpro2/Jbpro.git"
+REPO_URL="https://github.com/Jbpro2/K3pro.git"
 REPO_BRANCH="main"
 CMD_NAME="mpro"
 TOTAL_STEPS=7
