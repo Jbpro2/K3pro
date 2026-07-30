@@ -137,28 +137,6 @@ WantedBy=multi-user.target
 EOF
 }
 
-create_xhttp_service() {
-    local PORT=$1
-    local STATUS=$2
-    local SSH_PORT=$3
-    local SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
-    EXTRA_ARGS="-p ${PORT} -s ${STATUS} --ssh-port ${SSH_PORT}"
-    cat > "$SERVICE_FILE" << EOF
-[Unit]
-Description=Mpro xHTTP + SSL Tunnel - Porta ${PORT}
-After=network.target
-[Service]
-Type=simple
-ExecStart=${LKPROXY_XHTTP} ${EXTRA_ARGS}
-Restart=on-failure
-RestartSec=5
-User=root
-WorkingDirectory=/opt/mpro
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
 open_port() {
     clear
     show_banner
@@ -167,7 +145,7 @@ open_port() {
     box_line "${WHITE}${BOLD}Abrir Porta${NC}"
     box_mid
     box_line "${WHITE}Portas padrão: 80, 8080, 8880, 3128${NC}"
-    box_line "${YELLOW}Porta 443: use opção [04] xHTTP/SSL${NC}"
+    box_line "${YELLOW}Porta 443: use opção [04] XHTTP INTEGRADO${NC}"
     box_bottom
     echo ""
     read -p "Porta: " PORT
@@ -184,30 +162,6 @@ open_port() {
     systemctl daemon-reload
     systemctl enable "proxy-${PORT}.service" 2>/dev/null
     systemctl start "proxy-${PORT}.service" 2>/dev/null
-    sleep 2
-    read -p "Enter pra continuar..."
-}
-
-open_xhttp() {
-    clear
-    show_banner
-    echo ""
-    box_top
-    box_line "${WHITE}${BOLD}xHTTP_SSH / SSL TUNNEL - Porta 443${NC}"
-    box_bottom
-    echo ""
-    read -p "Status HTTP (Padrão: @Mpro): " STATUS
-    [[ -z "$STATUS" ]] && STATUS="@Mpro"
-    read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
-    [[ -z "$SSH_PORT" ]] && SSH_PORT="22"
-    mkdir -p /opt/mpro
-    if [ ! -f "/opt/mpro/cert.pem" ]; then
-        openssl req -x509 -newkey rsa:2048 -keyout /opt/mpro/key.pem -out /opt/mpro/cert.pem -days 365 -nodes -subj "/CN=mpro" 2>/dev/null
-    fi
-    create_xhttp_service "443" "$STATUS" "$SSH_PORT"
-    systemctl daemon-reload
-    systemctl enable "proxy-443.service" 2>/dev/null
-    systemctl start "proxy-443.service" 2>/dev/null
     sleep 2
     read -p "Enter pra continuar..."
 }
@@ -241,6 +195,8 @@ open_integrated() {
     fi
     read -p "Status HTTP (Padrão: @Mpro): " STATUS
     [[ -z "$STATUS" ]] && STATUS="@Mpro"
+    read -p "Porta SSH backend (Padrão: 22): " SSH_PORT
+    [[ -z "$SSH_PORT" ]] && SSH_PORT="22"
     mkdir -p /opt/mpro
     if [ ! -f "/opt/mpro/cert.pem" ]; then
         openssl req -x509 -newkey rsa:2048 -keyout /opt/mpro/key.pem -out /opt/mpro/cert.pem -days 365 -nodes -subj "/CN=mpro" 2>/dev/null
@@ -251,7 +207,7 @@ Description=Mpro Integrated
 After=network.target
 [Service]
 Type=simple
-ExecStart=${LKPROXY_INTEGRATED} -p ${PORT} -s ${STATUS} --tun ${TUN} --subnet ${SUBNET} ${UDP_ARG} ${QUIC_ARG}
+ExecStart=${LKPROXY_INTEGRATED} -p ${PORT} -s ${STATUS} --ssh-port ${SSH_PORT} --tun ${TUN} --subnet ${SUBNET} ${UDP_ARG} ${QUIC_ARG}
 Restart=on-failure
 RestartSec=5
 User=root
@@ -312,8 +268,7 @@ show_menu() {
     box_line "${WHITE}[01]${NC} - ABRIR PORTA"
     box_line "${WHITE}[02]${NC} - FECHAR PORTA"
     box_line "${WHITE}[03]${NC} - REINICIAR PORTA"
-    box_line "${MAGENTA}[04]${NC} - xHTTP_SSH / SSL TUNNEL ${GREEN}(${YELLOW}443${GREEN})${NC}"
-    box_line "${BLUE}[05]${NC} - PROXY + PROTOCOLO INTEGRADO (DTUNNEL/XHTTP)"
+    box_line "${BLUE}[04]${NC} - XHTTP + PROTOCOLO INTEGRADO (DTUNNEL/XHTTP)"
     box_line ""
     box_line "${WHITE}[00]${NC} - SAIR"
     box_bottom
@@ -328,8 +283,7 @@ while true; do
         01|1) open_port ;;
         02|2) close_port ;;
         03|3) restart_port ;;
-        04|4) open_xhttp ;;
-        05|5) open_integrated ;;
+        04|4|05|5) open_integrated ;;
         00|0) exit 0 ;;
         *) sleep 1 ;;
     esac
