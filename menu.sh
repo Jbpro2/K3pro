@@ -156,15 +156,15 @@ open_integrated() {
     clear
     echo -e "${CYAN}+--------------------------------------------------------+${NC}"
     echo -e "${CYAN}+--------------------------------------------------------+${NC}"
-    echo -e "${WHITE}|  CONFIGURACOES ATUAIS                                  |${NC}"
+    echo -e "${WHITE}|  CONFIGURACOES ATUAIS (XHTTP + SSL + DTUNNEL)          |${NC}"
     echo -e "${CYAN}+--------------------------------------------------------+${NC}"
-    echo -e "${WHITE}|  Porta: 8000                                           |${NC}"
+    echo -e "${WHITE}|  Porta: 443                                            |${NC}"
     echo -e "${WHITE}|  Sub-rede: 10.10.0.0/16                                |${NC}"
     echo -e "${WHITE}|  Interface TUN: tun0                                   |${NC}"
-    echo -e "${WHITE}|  Protocolos: tcp:8000,udp:8000,quic:8001               |${NC}"
+    echo -e "${WHITE}|  Protocolos: XHTTP, SSL, TCP, UDP, QUIC                |${NC}"
     echo -e "${CYAN}+--------------------------------------------------------+${NC}"
-    read -p "Porta (Enter para manter [8000]): " PORT
-    [[ -z "$PORT" ]] && PORT="8000"
+    read -p "Porta (Enter para manter [443]): " PORT
+    [[ -z "$PORT" ]] && PORT="443"
     read -p "Sub-rede CIDR (Enter para manter [10.10.0.0/16]): " SUBNET
     [[ -z "$SUBNET" ]] && SUBNET="10.10.0.0/16"
     read -p "Interface TUN (Enter para manter [tun0]): " TUN
@@ -190,7 +190,7 @@ open_integrated() {
     SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
     cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=Mpro Integrated - Porta ${PORT}
+Description=Mpro XHTTP+SSL+Integrated - Porta ${PORT}
 After=network.target
 [Service]
 Type=simple
@@ -202,11 +202,16 @@ WorkingDirectory=/opt/mpro
 [Install]
 WantedBy=multi-user.target
 EOF
+    # Limpar serviço antigo se existir
+    systemctl stop proxy-integrated.service 2>/dev/null
+    systemctl disable proxy-integrated.service 2>/dev/null
+    rm -f "${SYSTEMD_DIR}/proxy-integrated.service"
+    
     systemctl daemon-reload
     systemctl enable "proxy-${PORT}.service" 2>/dev/null
     systemctl start "proxy-${PORT}.service" 2>/dev/null
     sleep 2
-    echo "Servidor protocolo iniciado com sucesso!"
+    echo -e "${GREEN}Servidor XHTTP + SSL + INTEGRADO iniciado na porta ${PORT}!${NC}"
     read -p "Pressione Enter para continuar..."
 }
 
