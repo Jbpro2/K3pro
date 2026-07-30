@@ -283,7 +283,7 @@ while true; do
         01|1) open_port ;;
         02|2) close_port ;;
         03|3) restart_port ;;
-        04|4|05|5) open_integrated ;;
+        04|4) open_integrated ;;
         00|0) exit 0 ;;
         *) sleep 1 ;;
     esac
