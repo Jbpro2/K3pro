@@ -260,7 +260,7 @@ show_menu() {
     box_line "${WHITE}[01]${NC} - ABRIR PORTA"
     box_line "${WHITE}[02]${NC} - FECHAR PORTA"
     box_line "${WHITE}[03]${NC} - REINICIAR PORTA"
-    box_line "${BLUE}[04]${NC} - XHTTP + PROTOCOLO INTEGRADO (DTUNNEL/XHTTP)"
+    box_line "${BLUE}[04]${NC} - XHTTP + SSL TUNNEL + (PROTOCOLO)"
     box_line ""
     box_line "${WHITE}[00]${NC} - SAIR"
     box_bottom
