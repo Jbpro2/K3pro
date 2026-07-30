@@ -76,20 +76,12 @@ echo -e "${BLUE}${BOLD}----------------------------------------${NC}"
 
 show_active_ports() {
     ACTIVE=""
-    XHTTP_ACTIVE=false
-    INTEGRATED_ACTIVE=false
 
     for service_file in ${SYSTEMD_DIR}/proxy-*.service; do
         if [ -f "$service_file" ]; then
             NAME=$(basename "$service_file" .service | sed 's/proxy-//')
             if systemctl is-active --quiet "proxy-${NAME}.service" 2>/dev/null; then
-                if [ "$NAME" = "443" ]; then
-                    XHTTP_ACTIVE=true
-                elif [ "$NAME" = "integrated" ]; then
-                    INTEGRATED_ACTIVE=true
-                else
-                    ACTIVE="$ACTIVE $NAME"
-                fi
+                ACTIVE="$ACTIVE $NAME"
             fi
         fi
     done
@@ -97,12 +89,6 @@ show_active_ports() {
     local ports_str=""
     if [ -n "$ACTIVE" ]; then
         ports_str="${YELLOW}${ACTIVE# }${NC}"
-    fi
-    if [ "$XHTTP_ACTIVE" = true ]; then
-        ports_str="${ports_str}${ports_str:+ }${YELLOW}443${NC}"
-    fi
-    if [ "$INTEGRATED_ACTIVE" = true ]; then
-        ports_str="${ports_str}${ports_str:+ }${GREEN}INTEGRADO${NC}"
     fi
     if [ -z "$ports_str" ]; then
         ports_str="${RED}nenhuma${NC}"
@@ -201,9 +187,10 @@ open_integrated() {
     if [ ! -f "/opt/mpro/cert.pem" ]; then
         openssl req -x509 -newkey rsa:2048 -keyout /opt/mpro/key.pem -out /opt/mpro/cert.pem -days 365 -nodes -subj "/CN=mpro" 2>/dev/null
     fi
-    cat > "${SYSTEMD_DIR}/proxy-integrated.service" << EOF
+    SERVICE_FILE="${SYSTEMD_DIR}/proxy-${PORT}.service"
+    cat > "$SERVICE_FILE" << EOF
 [Unit]
-Description=Mpro Integrated
+Description=Mpro Integrated - Porta ${PORT}
 After=network.target
 [Service]
 Type=simple
@@ -216,8 +203,8 @@ WorkingDirectory=/opt/mpro
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable proxy-integrated.service 2>/dev/null
-    systemctl start proxy-integrated.service 2>/dev/null
+    systemctl enable "proxy-${PORT}.service" 2>/dev/null
+    systemctl start "proxy-${PORT}.service" 2>/dev/null
     sleep 2
     echo "Servidor protocolo iniciado com sucesso!"
     read -p "Pressione Enter para continuar..."
