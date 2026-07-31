@@ -34,7 +34,3 @@ path = "src/bin/xhttp.rs"
 [[bin]]
 name = "mpro-integrated"
 path = "src/bin/xhttp_integrated.rs"
-
-[[bin]]
-name = "xhtp"
-path = "src/bin/xhtp.rs"
