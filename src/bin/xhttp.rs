@@ -130,11 +130,12 @@ async fn handle_tls_dual(
     }
 
     if http_str.contains("HTTP/1.") {
-        let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
+        // Fator 1: Keep-Alive nos headers (timeout=30, max=100)
+        let resp = format!("HTTP/1.1 101 ({})\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\nHTTP/1.1 200 ({})\r\nConnection: keep-alive\r\nKeep-Alive: timeout=30, max=100\r\n\r\n", status, status);
         tls_stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
         return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
     }
-    
+
     handle_ssh_direct_tls(tls_stream, ssh_port, Some(data.to_vec())).await
 }
 
@@ -174,83 +175,12 @@ async fn handle_ssh_direct(stream: TcpStream, ssh_port: u16) -> Result<(), Xhttp
     let (mut r, mut w) = stream.into_split();
     let (mut sr, mut sw) = ssh.into_split();
     let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
-async fn handle_tls_dual(
-    stream: TcpStream,
-    status: &str,
-    ssh_port: u16,
-) -> Result<(), XhttpError> {
-    let cert_path = "/opt/sdproxy/cert.pem";
-    let key_path = "/opt/sdproxy/key.pem";
-
-    let config = build_tls_config(cert_path, key_path)?;
-    let acceptor = TlsAcceptor::from(Arc::new(config));
-    let mut tls_stream = acceptor.accept(stream).await.map_err(|e| Box::new(e) as XhttpError)?;
-
-    let mut buf = vec![0u8; 4096];
-    let n = match timeout(Duration::from_secs(3), tls_stream.read(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => n,
-        _ => return handle_ssh_direct_tls(tls_stream, ssh_port, None).await,
-    };
-
-    let data = &buf[..n];
-    let http_str = String::from_utf8_lossy(data);
-    
-    if http_str.contains("GET ") {
-        if let Some((_, path)) = parse_http_request(&http_str) {
-            return handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await;
-        }
-    } else if http_str.contains("POST ") {
-        if let Some((_, path)) = parse_http_request(&http_str) {
-            return handle_xhttp_post_tls(&mut tls_stream, data, &path, status).await;
-        }
-    }
-
-    if http_str.contains("HTTP/1.") {
-        let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
-        tls_stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
-        return handle_ssh_direct_tls(tls_stream, ssh_port, None).await;
-    }
-
-    handle_ssh_direct_tls(tls_stream, ssh_port, Some(data.to_vec())).await
-}
-
-async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
-    let mut buf = vec![0u8; 8192];
-    let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
-    let http_str = String::from_utf8_lossy(&buf[..n]);
-    
-    if http_str.contains("GET ") {
-        if let Some((_, path)) = parse_http_request(&http_str) {
-            return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await;
-        }
-    } else if http_str.contains("POST ") {
-        if let Some((_, path)) = parse_http_request(&http_str) {
-            return handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await;
-        }
-    }
-
-    if http_str.contains("HTTP/1.") {
-        let resp = format!("HTTP/1.1 101 ({})\r\n\r\nHTTP/1.1 200 ({})\r\n\r\n", status, status);
-        stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
-    }
-    
-    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
-    let (mut r, mut w) = stream.into_split();
-    let (mut sr, mut sw) = ssh.into_split();
-    let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
-    Ok(())
-}
-
-async fn handle_ssh_direct(mut stream: TcpStream, ssh_port: u16) -> Result<(), XhttpError> {
-    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
-    let (mut r, mut w) = stream.into_split();
-    let (mut sr, mut sw) = ssh.into_split();
-    let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
     Ok(())
 }
 
 async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpStream>, ssh_port: u16, initial_data: Option<Vec<u8>>) -> Result<(), XhttpError> {
-    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    // Fator 3: SSH connect timeout reduzido para 3s
+    let mut ssh = timeout(Duration::from_secs(3), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
     if let Some(data) = initial_data {
         ssh.write_all(&data).await.map_err(|e| Box::new(e) as XhttpError)?;
     }
@@ -275,18 +205,21 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
 
     // Fator 1: RESPOSTA IMEDIATA com Keep-Alive (timeout=30, max=100)
     let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-        Content-Type: application/octet-stream\r\n\
-        Transfer-Encoding: chunked\r\n\
-        Connection: keep-alive\r\n\
-        Keep-Alive: timeout=30, max=100\r\n\
-        Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
-        Pragma: no-cache\r\n\
-        Expires: 0\r\n\
-        X-Session-ID: {}\r\n\
-        X-Status: {}\r\n\r\n", 
-        sid, status
-    );
+    "HTTP/1.1 200 OK\r\n\
+    Content-Type: application/octet-stream\r\n\
+    Transfer-Encoding: chunked\r\n\
+    Connection: keep-alive\r\n\
+    Keep-Alive: timeout=30, max=100\r\n\
+    Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
+    Pragma: no-cache\r\n\
+    Expires: 0\r\n\
+    X-Session-ID: {}\r\n\
+    X-Status: {}\r\n\
+    \r\n\
+    0\r\n\
+    \r\n",  // <- Termina o chunked corretamente
+    sid, status
+);
     tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     tls.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
@@ -349,18 +282,21 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
 
     // Fator 1: RESPOSTA IMEDIATA com Keep-Alive (timeout=30, max=100)
     let resp = format!(
-        "HTTP/1.1 200 OK\r\n\
-        Content-Type: application/octet-stream\r\n\
-        Transfer-Encoding: chunked\r\n\
-        Connection: keep-alive\r\n\
-        Keep-Alive: timeout=30, max=100\r\n\
-        Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
-        Pragma: no-cache\r\n\
-        Expires: 0\r\n\
-        X-Session-ID: {}\r\n\
-        X-Status: {}\r\n\r\n", 
-        sid, status
-    );
+    "HTTP/1.1 200 OK\r\n\
+    Content-Type: application/octet-stream\r\n\
+    Transfer-Encoding: chunked\r\n\
+    Connection: keep-alive\r\n\
+    Keep-Alive: timeout=30, max=100\r\n\
+    Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n\
+    Pragma: no-cache\r\n\
+    Expires: 0\r\n\
+    X-Session-ID: {}\r\n\
+    X-Status: {}\r\n\
+    \r\n\
+    0\r\n\
+    \r\n",  // <- Termina o chunked corretamente
+    sid, status
+);
     stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     stream.flush().await.map_err(|e| Box::new(e) as XhttpError)?;
 
