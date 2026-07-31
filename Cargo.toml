@@ -29,7 +29,7 @@ path = "src/main.rs"
 
 [[bin]]
 name = "mpro-xhttp"
-path = "src/bin/xhttp.rs"
+path = "src/xhttp.rs"
 
 [[bin]]
 name = "mpro-integrated"

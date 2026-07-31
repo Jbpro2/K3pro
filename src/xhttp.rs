@@ -28,7 +28,7 @@ async fn main() -> Result<(), XhttpError> {
     let status = get_status();
     let ssh_port = get_ssh_port();
 
-    println!("[Mpro] xHTTP v3.3.4 (XHTTP + SSL Payload Support)");
+    println!("[BDRProxy] xHTTP v3.4.0 (DTunnel Final Fix)");
     println!("[xHTTP] Porta: {} | SSH Backend: 127.0.0.1:{}", port, ssh_port);
 
     let listener = TcpListener::bind(format!("[::]:{}", port)).await.map_err(|e| Box::new(e) as XhttpError)?;
@@ -37,10 +37,14 @@ async fn main() -> Result<(), XhttpError> {
     loop {
         match listener.accept().await {
             Ok((client_stream, addr)) => {
+                let _ = client_stream.set_nodelay(true);
                 let status = status_arc.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_xhttp_client(client_stream, &status, ssh_port).await {
-                        println!("[xHTTP] Erro cliente {}: {}", addr, e);
+                        let err_str = e.to_string();
+                        if !err_str.contains("Broken pipe") && !err_str.contains("Connection reset") {
+                            println!("[xHTTP] Info {}: {}", addr, e);
+                        }
                     }
                 });
             }
@@ -53,7 +57,7 @@ async fn main() -> Result<(), XhttpError> {
 
 async fn handle_xhttp_client(stream: TcpStream, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
     let mut peek_buf = [0u8; 3];
-    let peek_result = timeout(Duration::from_secs(10), stream.peek(&mut peek_buf)).await;
+    let peek_result = timeout(Duration::from_secs(5), stream.peek(&mut peek_buf)).await;
     let bytes_peeked = match peek_result {
         Ok(Ok(n)) => n,
         _ => return Ok(()),
@@ -90,13 +94,13 @@ async fn handle_tls_dual(stream: TcpStream, status: &str, ssh_port: u16) -> Resu
     let data = &buf[..n];
     let http_str = String::from_utf8_lossy(data);
     
-    if (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
-        if let Some((method, path)) = parse_http_request(&http_str) {
-            match method.as_str() {
-                "GET" => return handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await,
-                "POST" => return handle_xhttp_post_tls(&mut tls_stream, data, &path, status).await,
-                _ => {}
-            }
+    if http_str.contains("GET ") {
+        if let Some((_, path)) = parse_http_request(&http_str) {
+            return handle_xhttp_get_tls(&mut tls_stream, &path, status, ssh_port).await;
+        }
+    } else if http_str.contains("POST ") {
+        if let Some((_, path)) = parse_http_request(&http_str) {
+            return handle_xhttp_post_tls(&mut tls_stream, data, &path, status).await;
         }
     }
 
@@ -114,13 +118,13 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
     let n = stream.read(&mut buf).await.map_err(|e| Box::new(e) as XhttpError)?;
     let http_str = String::from_utf8_lossy(&buf[..n]);
     
-    if (http_str.contains("x-session-id") || http_str.contains("/ssh/") || http_str.contains("/xhttp/")) {
-        if let Some((method, path)) = parse_http_request(&http_str) {
-            match method.as_str() {
-                "GET" => return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await,
-                "POST" => return handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await,
-                _ => {}
-            }
+    if http_str.contains("GET ") {
+        if let Some((_, path)) = parse_http_request(&http_str) {
+            return handle_xhttp_get_raw(&mut stream, &path, status, ssh_port).await;
+        }
+    } else if http_str.contains("POST ") {
+        if let Some((_, path)) = parse_http_request(&http_str) {
+            return handle_xhttp_post_raw(&mut stream, &buf[..n], &path, status).await;
         }
     }
 
@@ -129,7 +133,7 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
         stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
     }
     
-    let mut ssh = timeout(Duration::from_secs(5), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
+    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut r, mut w) = stream.into_split();
     let (mut sr, mut sw) = ssh.into_split();
     let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
@@ -137,7 +141,7 @@ async fn handle_http_dual_raw(mut stream: TcpStream, status: &str, ssh_port: u16
 }
 
 async fn handle_ssh_direct(mut stream: TcpStream, ssh_port: u16) -> Result<(), XhttpError> {
-    let mut ssh = timeout(Duration::from_secs(5), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
+    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     let (mut r, mut w) = stream.into_split();
     let (mut sr, mut sw) = ssh.into_split();
     let _ = tokio::join!(tokio::io::copy(&mut r, &mut sw), tokio::io::copy(&mut sr, &mut w));
@@ -145,7 +149,7 @@ async fn handle_ssh_direct(mut stream: TcpStream, ssh_port: u16) -> Result<(), X
 }
 
 async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpStream>, ssh_port: u16, initial_data: Option<Vec<u8>>) -> Result<(), XhttpError> {
-    let mut ssh = timeout(Duration::from_secs(5), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
+    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
     if let Some(data) = initial_data { ssh.write_all(&data).await.map_err(|e| Box::new(e) as XhttpError)?; }
     let (mut r, mut w) = tokio::io::split(tls_stream);
     let (mut sr, mut sw) = ssh.into_split();
@@ -153,9 +157,17 @@ async fn handle_ssh_direct_tls(tls_stream: tokio_rustls::server::TlsStream<TcpSt
     Ok(())
 }
 
-async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
-    let (sid, _) = extract_path_info(path);
-    let ssh = timeout(Duration::from_secs(5), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
+async fn handle_xhttp_get_tls(
+    tls: &mut tokio_rustls::server::TlsStream<TcpStream>, 
+    path: &str, 
+    status: &str, 
+    ssh_port: u16
+) -> Result<(), XhttpError> {
+    let (mut sid, _) = extract_path_info(path);
+    if sid.is_empty() { sid = "default".to_string(); }
+    
+    let mut ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = ssh.set_nodelay(true);
     let (mut sr, mut sw) = ssh.into_split();
     let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(1024);
     let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(1024);
@@ -165,8 +177,28 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
     tokio::spawn(async move { while let Some(d) = prx.recv().await { if !*act_c.read().await { break; } let _ = sw.write_all(&d).await; } });
     let gtx_c = gtx.clone();
     tokio::spawn(async move { let mut b = vec![0u8; 16384]; while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } } });
-    let resp = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-Session-ID: {}\r\nX-Status: {}\r\n\r\n", sid, status);
+    
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Connection: keep-alive\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Cache-Control: no-store, no-cache, must-revalidate\r\n\
+         Pragma: no-cache\r\n\
+         Expires: 0\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         X-Session-ID: {}\r\n\
+         X-Status: {}\r\n\r\n", 
+        sid, status
+    );
+    
     tls.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    tls.flush().await?;
+
+    let msg = "XHTTP download started\n";
+    tls.write_all(format!("{:x}\r\n{}\r\n", msg.len(), msg).as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = tls.flush().await;
+
     while let Some(d) = grx.recv().await {
         if tls.write_all(format!("{:x}\r\n", d.len()).as_bytes()).await.is_err() { break; }
         if tls.write_all(&d).await.is_err() { break; }
@@ -177,8 +209,11 @@ async fn handle_xhttp_get_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStrea
 }
 
 async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, ssh_port: u16) -> Result<(), XhttpError> {
-    let (sid, _) = extract_path_info(path);
-    let ssh = timeout(Duration::from_secs(5), TcpStream::connect(format!("127.0.0.1:{}", ssh_port))).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "SSH Connect Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
+    let (mut sid, _) = extract_path_info(path);
+    if sid.is_empty() { sid = "default".to_string(); }
+    
+    let ssh = TcpStream::connect(format!("127.0.0.1:{}", ssh_port)).await.map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = ssh.set_nodelay(true);
     let (mut sr, mut sw) = ssh.into_split();
     let (ptx, mut prx) = mpsc::channel::<Vec<u8>>(1024);
     let (gtx, mut grx) = mpsc::channel::<Vec<u8>>(1024);
@@ -186,8 +221,21 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
     tokio::spawn(async move { while let Some(d) = prx.recv().await { let _ = sw.write_all(&d).await; } });
     let gtx_c = gtx.clone();
     tokio::spawn(async move { let mut b = vec![0u8; 16384]; while let Ok(Ok(n)) = timeout(Duration::from_secs(600), sr.read(&mut b)).await { if n == 0 || gtx_c.send(b[..n].to_vec()).await.is_err() { break; } } });
-    let resp = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX-Session-ID: {}\r\nX-Status: {}\r\n\r\n", sid, status);
+    let resp = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Connection: keep-alive\r\n\
+         Content-Type: application/octet-stream\r\n\
+         Transfer-Encoding: chunked\r\n\
+         X-Session-ID: {}\r\n\
+         X-Status: {}\r\n\r\n", 
+        sid, status
+    );
     stream.write_all(resp.as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    
+    let msg = "XHTTP download started\n";
+    stream.write_all(format!("{:x}\r\n{}\r\n", msg.len(), msg).as_bytes()).await.map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = stream.flush().await;
+
     while let Some(d) = grx.recv().await {
         if stream.write_all(format!("{:x}\r\n", d.len()).as_bytes()).await.is_err() { break; }
         if stream.write_all(&d).await.is_err() { break; }
@@ -198,34 +246,40 @@ async fn handle_xhttp_get_raw(stream: &mut TcpStream, path: &str, status: &str, 
 }
 
 async fn handle_xhttp_post_tls(tls: &mut tokio_rustls::server::TlsStream<TcpStream>, req: &[u8], path: &str, _: &str) -> Result<(), XhttpError> {
-    let (sid, _) = extract_path_info(path);
+    let (mut sid, _) = extract_path_info(path);
+    if sid.is_empty() { sid = "default".to_string(); }
     let cl = extract_content_length_from_bytes(req).unwrap_or(0);
     let h_end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let mut body = req[h_end..].to_vec();
     while body.len() < cl {
         let mut b = vec![0u8; cl - body.len()];
-        let n = timeout(Duration::from_secs(5), tls.read(&mut b)).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "POST Read Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
+        let n = tls.read(&mut b).await.map_err(|e| Box::new(e) as XhttpError)?;
         if n == 0 { break; }
         body.extend_from_slice(&b[..n]);
     }
     if let Some(s) = SESSIONS.lock().await.get(&sid) { let _ = s.post_tx.send(body).await; }
-    tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.map_err(|e| Box::new(e) as XhttpError)?;
+    else if let Some(s) = SESSIONS.lock().await.get("default") { let _ = s.post_tx.send(body).await; }
+    tls.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n").await.map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = tls.flush().await;
     Ok(())
 }
 
 async fn handle_xhttp_post_raw(stream: &mut TcpStream, req: &[u8], path: &str, _: &str) -> Result<(), XhttpError> {
-    let (sid, _) = extract_path_info(path);
+    let (mut sid, _) = extract_path_info(path);
+    if sid.is_empty() { sid = "default".to_string(); }
     let cl = extract_content_length_from_bytes(req).unwrap_or(0);
     let h_end = req.windows(4).position(|w| w == b"\r\n\r\n").unwrap_or(0) + 4;
     let mut body = req[h_end..].to_vec();
     while body.len() < cl {
         let mut b = vec![0u8; cl - body.len()];
-        let n = timeout(Duration::from_secs(5), stream.read(&mut b)).await.map_err(|_| Box::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "POST Read Timeout")) as XhttpError)?.map_err(|e| Box::new(e) as XhttpError)?;
+        let n = stream.read(&mut b).await.map_err(|e| Box::new(e) as XhttpError)?;
         if n == 0 { break; }
         body.extend_from_slice(&b[..n]);
     }
     if let Some(s) = SESSIONS.lock().await.get(&sid) { let _ = s.post_tx.send(body).await; }
+    else if let Some(s) = SESSIONS.lock().await.get("default") { let _ = s.post_tx.send(body).await; }
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.map_err(|e| Box::new(e) as XhttpError)?;
+    let _ = stream.flush().await;
     Ok(())
 }
 
@@ -258,11 +312,13 @@ fn build_tls_config(cp: &str, kp: &str) -> Result<rustls::ServerConfig, XhttpErr
     let keys: Vec<PrivateKey> = rustls_pemfile::pkcs8_private_keys(&mut std::io::BufReader::new(std::fs::File::open(kp).map_err(|e| Box::new(e) as XhttpError)?)).map_err(|e| Box::new(e) as XhttpError)?.into_iter().map(PrivateKey).collect();
     if certs.is_empty() || keys.is_empty() { return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Certs empty")) as XhttpError); }
     let mut c = rustls::ServerConfig::builder().with_safe_defaults().with_no_client_auth().with_single_cert(certs, keys.into_iter().next().unwrap()).map_err(|e| Box::new(e) as XhttpError)?;
-    c.alpn_protocols = vec![b"http/1.1".to_vec(), b"h2".to_vec()];
+    
+    c.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    c.versions = vec![rustls::ProtocolVersion::TLSv1_2, rustls::ProtocolVersion::TLSv1_3];
+    
     Ok(c)
 }
 
 fn get_port() -> u16 { std::env::args().enumerate().find(|(_, a)| a == "--port" || a == "-p").and_then(|(i, _)| std::env::args().nth(i+1)).and_then(|a| a.parse().ok()).unwrap_or(443) }
 fn get_ssh_port() -> u16 { std::env::args().enumerate().find(|(_, a)| a == "--ssh-port").and_then(|(i, _)| std::env::args().nth(i+1)).and_then(|a| a.parse().ok()).unwrap_or(22) }
 fn get_status() -> String { std::env::args().enumerate().find(|(_, a)| a == "--status" || a == "-s").and_then(|(i, _)| std::env::args().nth(i+1)).unwrap_or("@Mpro".to_string()) }
-fn generate_session_id() -> String { format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()) }
