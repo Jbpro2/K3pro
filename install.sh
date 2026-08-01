@@ -60,8 +60,10 @@ show_progress "Verificando Rust..."
 if ! command -v cargo &> /dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1
     source "$HOME/.cargo/env"
+    rustup default stable > /dev/null 2>&1
 else
     source "$HOME/.cargo/env"
+    rustup default stable > /dev/null 2>&1
 fi
 
 # --- Etapa 3 ---
