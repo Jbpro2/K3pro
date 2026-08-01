@@ -57,14 +57,13 @@ apt install -y curl build-essential git libssl-dev pkg-config openssl > /dev/nul
 
 # --- Etapa 2 ---
 show_progress "Verificando Rust..."
-if ! command -v cargo &> /dev/null; then
+if ! command -v rustup &> /dev/null; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y > /dev/null 2>&1
-    source "$HOME/.cargo/env"
-    rustup default stable > /dev/null 2>&1
-else
-    source "$HOME/.cargo/env"
-    rustup default stable > /dev/null 2>&1
 fi
+source "$HOME/.cargo/env"
+# Forçar instalação/reparo do toolchain stable
+rustup toolchain install stable --profile minimal > /dev/null 2>&1
+rustup default stable > /dev/null 2>&1
 
 # --- Etapa 3 ---
 show_progress "Baixando código fonte..."
